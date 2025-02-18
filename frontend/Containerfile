@@ -26,7 +26,9 @@ RUN npm cache clean --force
 
 RUN npm install
 
-RUN npm install quill 
+RUN npm install quill
+
+RUN npm install socket.io-client
 
 # Run svelte-kit sync to generate type definitions and internal files
 # RUN npm run sync

@@ -1,20 +1,47 @@
 <script>
   import { onMount, setContext } from 'svelte';
-  import { writable } from 'svelte/store';
+  import { get } from 'svelte/store';
   import NavBar from '$lib/NavBar.svelte';
+  import { filters } from '$lib/filters.js';
   import { fetchIncidents, loadPreferences, savePreferences } from '$lib/incidentHelpers.js';
+  import { writable } from 'svelte/store';
+
 
   let allIncidentsCollapsed = true;
   let allMainAlertsCollapsed = true;
   let allCommentsCollapsed = true;
 
-  let statusFilter = "open";
-  let teamFilter = "";
-  let assigneeFilter = "";
-  let severityFilter = "";
-  let linkMainAlertId = "";
-  let bulkTargetIncidentId = "";
+    // Subscribe to the filters store (we use get() to derive local variables)
+  let statusFilter, teamFilter, assigneeFilter, severityFilter, sortBy, sortOrder, firstAlertStart, firstAlertEnd, lastAlertStart, lastAlertEnd;
+  $: ({ statusFilter, teamFilter, assigneeFilter, severityFilter, sortBy, sortOrder, firstAlertStart, firstAlertEnd, lastAlertStart, lastAlertEnd } = get(filters));
 
+  // Update the store when NavBar dispatches a change event.
+  function handleStatusFilterChange(e) {
+    filters.update(f => ({ ...f, statusFilter: e.detail }));
+    console.log("Status changed to", e.detail);
+  }
+  function handleTeamFilterChange(e) {
+    filters.update(f => ({ ...f, teamFilter: e.detail }));
+  }
+  function handleAssigneeFilterChange(e) {
+    filters.update(f => ({ ...f, assigneeFilter: e.detail }));
+  }
+  function handleSeverityFilterChange(e) {
+    filters.update(f => ({ ...f, severityFilter: e.detail }));
+  }
+  function handleSortByChange(e) {
+    filters.update(f => ({ ...f, sortBy: e.detail }));
+  }
+  function handleSortOrderChange(e) {
+    filters.update(f => ({ ...f, sortOrder: e.detail }));
+  }
+  // This handler listens for date filter changes.
+  function handleDateFilterChange(e) {
+    const { filterKey, value } = e.detail;
+    console.log(`Layout: Date filter changed: ${filterKey} = ${value}`);
+    filters.update(f => ({ ...f, [filterKey]: value }));
+  }
+  // Other variables/functions for the app.
   let userProfile = {
     fullName: "John Doe",
     role: "Admin",
@@ -27,32 +54,41 @@
   // Create a Svelte store for incidents.
   const incidentsStore = writable([]);
 
-  // Shared undo/redo stacks and functions
+  // (Undo/redo functions and other helper functions remain as needed.)
   let undoStack = [];
   let redoStack = [];
 
   function recordAction(action) {
     if (action.incidentId !== undefined) {
       undoStack.push(action);
-      console.log("Action recorded:", action, "UndoStack:", undoStack);
+      console.log("Action recorded:", action);
       redoStack = [];
     }
   }
 
   async function fetchIncidentsWrapper() {
+    const f = get(filters);
     const data = await fetchIncidents(
-      statusFilter,
-      teamFilter,
-      assigneeFilter,
-      severityFilter,
-      allIncidentsCollapsed,
-      allMainAlertsCollapsed,
-      allCommentsCollapsed,
-      prefs
+      f.statusFilter,
+      f.teamFilter,
+      f.assigneeFilter,
+      f.severityFilter,
+      true,  // For example, using true for collapse states
+      true,
+      true,
+      prefs,
+      f.firstAlertStart,
+      f.firstAlertEnd,
+      f.lastAlertStart,
+      f.lastAlertEnd,             
+      // allIncidentsCollapsed,
+      // allMainAlertsCollapsed,
+      // allCommentsCollapsed,
+      // prefs
     );
-    // Force a new array reference so the store updates.
+    // Apply client-side sorting
     incidentsStore.set([...data]);
-    console.log("Fetched incidents:", data);
+    console.log("Fetched and sorted incidents:", data);
   }
 
   async function undoAction() {
@@ -183,6 +219,17 @@
     console.log("Redo action executed");
   }
 
+  function toggleDropdown(inc, field) {
+    inc["show" + field + "Dropdown"] = !inc["show" + field + "Dropdown"];
+    // Update the shared store so the UI reflects the change
+    incidentsStore.update(items =>
+      items.map(item =>
+        item.id === inc.id ? { ...item, ["show" + field + "Dropdown"]: inc["show" + field + "Dropdown"] } : item
+      )
+    );
+    fetchIncidentsWrapper();
+  }
+
   function toggleDarkMode() {
     darkMode = !darkMode;
     prefs.darkMode = darkMode;
@@ -222,7 +269,8 @@
     fetchIncidentsWrapper();
   });
 
-  // Provide the shared undo manager and incidents store to child pages.
+    // Provide contexts to child pages.
+  setContext("filters", filters);
   setContext("undoManager", { recordAction, undoAction, redoAction });
   setContext("incidentsStore", incidentsStore);
 </script>
@@ -234,6 +282,20 @@
   {redoAction}
   {toggleDarkMode}
   {logout}
+  {statusFilter}
+  {teamFilter}
+  {assigneeFilter}
+  {severityFilter}
+  {sortBy}
+  {sortOrder}
+  on:statusFilterChange={handleStatusFilterChange}
+  on:teamFilterChange={handleTeamFilterChange}
+  on:assigneeFilterChange={handleAssigneeFilterChange}
+  on:severityFilterChange={handleSeverityFilterChange}
+  on:sortByChange={handleSortByChange}
+  on:sortOrderChange={handleSortOrderChange}
+  on:dateFilterChange={handleDateFilterChange}
 />
+
 
 <slot />

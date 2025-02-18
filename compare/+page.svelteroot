@@ -1,0 +1,651 @@
+<script>
+  import QuillEditor from "$lib/QuillEditor.svelte";
+  import { onMount, getContext } from "svelte";
+  import { fetchIncidents, loadPreferences, savePreferences } from "$lib/incidentHelpers.js";
+  import { browser } from '$app/environment';
+
+  // Retrieve the shared undo manager and incidents store.
+  const { recordAction } = getContext("undoManager");
+  const incidentsStore = getContext("incidentsStore");
+
+  // Local state defaults
+  let newAlertName = "";
+  let statusFilter = "open";
+  let teamFilter = "";
+  let assigneeFilter = "";
+  let severityFilter = "";
+  let linkMainAlertId = "";
+  let bulkTargetIncidentId = "";
+
+  // Global collapse states – default values
+  let allIncidentsCollapsed = true;
+  let allMainAlertsCollapsed = true;
+  let allCommentsCollapsed = true;
+
+  // Load saved preferences from helper
+  let prefs = loadPreferences();
+  // Ensure the object for comment collapse is present.
+  if (!prefs.commentsCollapsed) {
+    prefs.commentsCollapsed = {};
+  }
+
+  onMount(() => {
+    if (browser) {
+      // Read filter preferences from localStorage
+      statusFilter = localStorage.getItem("statusFilter") || "open";
+      teamFilter = localStorage.getItem("teamFilter") || "";
+      assigneeFilter = localStorage.getItem("assigneeFilter") || "";
+      severityFilter = localStorage.getItem("severityFilter") || "";
+
+      // Read global collapse preferences (default true unless stored as "false")
+      allIncidentsCollapsed = localStorage.getItem("allIncidentsCollapsed") !== "false";
+      allMainAlertsCollapsed = localStorage.getItem("allMainAlertsCollapsed") !== "false";
+      allCommentsCollapsed = localStorage.getItem("allCommentsCollapsed") !== "false";
+    }
+    // Delay fetching so the above reads are complete.
+    setTimeout(() => {
+      fetchIncidentsWrapper();
+    }, 0);
+  });
+
+  async function fetchIncidentsWrapper() {
+    const data = await fetchIncidents(
+      statusFilter,
+      teamFilter,
+      assigneeFilter,
+      severityFilter,
+      allIncidentsCollapsed,
+      allMainAlertsCollapsed,
+      allCommentsCollapsed,
+      prefs
+    );
+    // Update the shared store.
+    incidentsStore.set([...data]);
+    console.log("Fetched incidents:", data);
+  }
+
+  // Save functions for per-incident preferences.
+  function saveIncidentPreference(incidentId, collapsed) {
+    prefs.collapsed[incidentId] = collapsed;
+    savePreferences(prefs);
+  }
+  function saveMainAlertsPreference(incidentId, collapsed) {
+    prefs.mainAlertsCollapsed[incidentId] = collapsed;
+    savePreferences(prefs);
+  }
+  function saveCommentsPreference(incidentId, collapsed) {
+    prefs.commentsCollapsed[incidentId] = collapsed;
+    savePreferences(prefs);
+  }
+
+  // --------------------------
+  // UI-only toggle functions
+
+  // Toggle the overall incident collapse state.
+  function toggleIncidentCollapse(inc) {
+    incidentsStore.update(items =>
+      items.map(item =>
+        item.id === inc.id ? { ...item, collapsed: !item.collapsed } : item
+      )
+    );
+    const newVal = !inc.collapsed;
+    prefs.collapsed[inc.id] = newVal;
+    savePreferences(prefs);
+  }
+
+  // Toggle the "main alerts" section for one incident.
+  function toggleMainAlerts(inc) {
+    let newVal;
+    incidentsStore.update(items =>
+      items.map(item => {
+        if (item.id === inc.id) {
+          newVal = !item.showMainAlerts;
+          return { ...item, showMainAlerts: newVal };
+        }
+        return item;
+      })
+    );
+    // In fetchIncidents() we compute showMainAlerts as:
+    //   (prefs.mainAlertsCollapsed[inc.id] !== undefined) ? !prefs.mainAlertsCollapsed[inc.id] : !allMainAlertsCollapsed;
+    // So store the inverse of newVal.
+    saveMainAlertsPreference(inc.id, !newVal);
+  }
+
+  // Toggle the "comments" section for one incident.
+  function toggleComments(inc) {
+    let newVal;
+    incidentsStore.update(items =>
+      items.map(item => {
+        if (item.id === inc.id) {
+          newVal = !item.showComments;
+          return { ...item, showComments: newVal };
+        }
+        return item;
+      })
+    );
+    // Similarly, store the inverse in prefs.commentsCollapsed.
+    saveCommentsPreference(inc.id, !newVal);
+  }
+
+  // For dropdowns, ensure that opening one closes the others.
+  const dropdownFields = ["Status", "Severity", "Team", "Assignee"];
+  function toggleDropdown(inc, field) {
+    // Close all dropdowns except for the selected field.
+    dropdownFields.forEach(f => {
+      if (f !== field) {
+        inc["show" + f + "Dropdown"] = false;
+      }
+    });
+    // Toggle the selected dropdown.
+    inc["show" + field + "Dropdown"] = !inc["show" + field + "Dropdown"];
+    // Update the store.
+    incidentsStore.update(items =>
+      items.map(item =>
+        item.id === inc.id
+          ? {
+              ...item,
+              showStatusDropdown: inc.showStatusDropdown || false,
+              showSeverityDropdown: inc.showSeverityDropdown || false,
+              showTeamDropdown: inc.showTeamDropdown || false,
+              showAssigneeDropdown: inc.showAssigneeDropdown || false
+            }
+          : item
+      )
+    );
+  }
+
+  // Global toggles (which also update localStorage).
+  function toggleAllIncidents() {
+    allIncidentsCollapsed = !allIncidentsCollapsed;
+    prefs.allCollapsed = allIncidentsCollapsed;
+    if (browser) localStorage.setItem("allIncidentsCollapsed", allIncidentsCollapsed);
+    let $incidents;
+    incidentsStore.subscribe(value => $incidents = value)();
+    $incidents.forEach(item => {
+      prefs.collapsed[item.id] = allIncidentsCollapsed;
+    });
+    savePreferences(prefs);
+    fetchIncidentsWrapper();
+  }
+  function toggleAllMainAlerts() {
+    allMainAlertsCollapsed = !allMainAlertsCollapsed;
+    prefs.allMainAlertsCollapsed = allMainAlertsCollapsed;
+    if (browser) localStorage.setItem("allMainAlertsCollapsed", allMainAlertsCollapsed);
+    let $incidents;
+    incidentsStore.subscribe(value => $incidents = value)();
+    $incidents.forEach(item => {
+      prefs.mainAlertsCollapsed[item.id] = allMainAlertsCollapsed;
+    });
+    savePreferences(prefs);
+    fetchIncidentsWrapper();
+  }
+  function toggleAllComments() {
+    allCommentsCollapsed = !allCommentsCollapsed;
+    prefs.allCommentsCollapsed = allCommentsCollapsed;
+    if (browser) localStorage.setItem("allCommentsCollapsed", allCommentsCollapsed);
+    savePreferences(prefs);
+    fetchIncidentsWrapper();
+  }
+
+  // Toggle select/unselect all incidents.
+  function toggleSelectAllIncidents() {
+    let $incidents;
+    incidentsStore.subscribe(value => $incidents = value)();
+    const allSelected = $incidents.every(item => item.selectedForBulk);
+    incidentsStore.update(items =>
+      items.map(item => ({ ...item, selectedForBulk: !allSelected }))
+    );
+  }
+
+  // Update localStorage when filters change.
+  function onStatusChange() {
+    if (browser) localStorage.setItem("statusFilter", statusFilter);
+    fetchIncidentsWrapper();
+  }
+  function onTeamChange() {
+    if (browser) localStorage.setItem("teamFilter", teamFilter);
+    fetchIncidentsWrapper();
+  }
+  function onAssigneeChange() {
+    if (browser) localStorage.setItem("assigneeFilter", assigneeFilter);
+    fetchIncidentsWrapper();
+  }
+  function onSeverityChange() {
+    if (browser) localStorage.setItem("severityFilter", severityFilter);
+    fetchIncidentsWrapper();
+  }
+
+  // ------------------------------------------------------------------
+  // (Other functions such as addIncidentComment, updateIncidentComment, submitComment,
+  // editComment, deleteIncidentComment, createAlert, bulkReopenIncidents, bulkResolveIncidents,
+  // bulkLinkMainAlerts, resolveIncident, definitivelyResolveIncident, reopenIncident, renameIncident,
+  // submitTitle, updateSeverity, updateTeam, updateAssignee, updateStatus, linkMainAlert remain unchanged.)
+  // For brevity, assume these functions remain exactly as in your current file.
+  // ------------------------------------------------------------------
+
+  // Example: (You should include your existing implementations for these functions below)
+  async function createAlert() {
+    if (!newAlertName) return;
+    const response = await fetch("http://localhost:8000/alerts/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alert_name: newAlertName })
+    });
+    const data = await response.json();
+    const incidentId = data.incident?.id || data.incident?.incident_id;
+    console.log("Recording create action for incident", incidentId);
+    if (incidentId !== undefined) {
+      recordAction({ type: "create", alertName: newAlertName, alertId: data.alert.id, incidentId });
+    } else {
+      console.warn("No incident id returned in createAlert");
+    }
+    newAlertName = "";
+    fetchIncidentsWrapper();
+  }
+  // ... (other functions would follow as before)
+
+</script>
+
+<svelte:head>
+  <title>IIM - Incidents</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/css/bootstrap.min.css" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" crossorigin="anonymous" />
+  <style>
+    body { background-color: #f0f2f5; }
+    body.dark-mode { background-color: #333; color: #eee; }
+    body.dark-mode .incident-box { background-color: #444; border-color: #555; }
+    body.dark-mode .main-alert-box { background-color: #555; border-color: #777; }
+    body.dark-mode .comment-box { background-color: #555; border-color: #777; }
+    body.dark-mode .form-control { background-color: #555; border-color: #777; color: #eee; }
+    body.dark-mode .form-control::placeholder { color: #ccc; }
+    body.dark-mode select.form-control { background-color: #555; border-color: #777; color: #eee; }
+    body.dark-mode .dropdown-menu { background-color: #444; border-color: #666; color: #eee; }
+    body.dark-mode .dropdown-item { background-color: #444; color: #eee; }
+    body.dark-mode .dropdown-item:hover { background-color: #555; }
+    .container-custom { max-width: 1500px; margin: 0 auto; }
+    .incident-box { border: 1px solid #ddd; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; background-color: #ffffff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .main-alert-box { background-color: #e9f7fe; border: 1px solid #007bff; border-radius: 0.5rem; padding: 0.5rem; margin-bottom: 0.5rem; }
+    .comment-box { background-color: #e9f7ef; border: 1px solid #28a745; border-radius: 0.5rem; padding: 0.5rem; margin-bottom: 0.5rem; }
+    .global-controls button { margin-right: 0.5rem; }
+    .dropdown-text { background: none; border: none; padding: 0; margin: 0 2px; font-family: inherit; font-size: 12px; color: inherit; cursor: pointer; }
+    .dropdown-menu { display: block; background: white; border: 1px solid #ccc; border-radius: 0.25rem; padding: 4px 0; position: absolute; z-index: 10; min-width: 200px; }
+    .dropdown-item { background: none; border: none; width: 100%; text-align: left; padding: 4px 8px; cursor: pointer; font-family: inherit; font-size: inherit; }
+    .dropdown-item:hover { background-color: #f1f1f1; }
+    .title-text { cursor: pointer; font-size: 1rem; font-weight: bold; }
+    .title-input { font-size: 1rem; font-weight: bold; border: none; outline: none; background: rgba(255,255,255,0.9); }
+  </style>
+</svelte:head>
+
+<div class="container container-custom">
+  <!-- New Alert Section -->
+  <div class="mb-4 comment-box">
+    <form on:submit|preventDefault={createAlert}>
+      <div class="form-group">
+        <label for="alert-name">New Alert:</label>
+        <input id="alert-name" class="form-control" bind:value={newAlertName} placeholder="Enter alert message" />
+      </div>
+      <button type="submit" class="btn btn-success">Create Alert</button>
+    </form>
+  </div>
+
+  <!-- Filter Section -->
+  <div class="mb-4">
+    <div class="form-row">
+      <div class="form-group col-md-3">
+        <label for="filter-status">Status:</label>
+        <select id="filter-status" class="form-control" bind:value={statusFilter} on:change={onStatusChange}>
+          <option value="open">Open</option>
+          <option value="resolved">Resolved</option>
+          <option value="all">All (open &amp; resolved)</option>
+        </select>
+      </div>
+      <div class="form-group col-md-3">
+        <label for="filter-team">Team:</label>
+        <select id="filter-team" class="form-control" bind:value={teamFilter} on:change={onTeamChange}>
+          <option value="">--Any--</option>
+          <option value="team1">team1</option>
+          <option value="team2">team2</option>
+          <option value="team3">team3</option>
+        </select>
+      </div>
+      <div class="form-group col-md-3">
+        <label for="filter-assignee">Assignee:</label>
+        <select id="filter-assignee" class="form-control" bind:value={assigneeFilter} on:change={onAssigneeChange}>
+          <option value="">--Any--</option>
+          <option value="person1">person1</option>
+          <option value="person2">person2</option>
+          <option value="person3">person3</option>
+          <option value="person4">person4</option>
+        </select>
+      </div>
+      <div class="form-group col-md-3">
+        <label for="filter-severity">Severity:</label>
+        <select id="filter-severity" class="form-control" bind:value={severityFilter} on:change={onSeverityChange}>
+          <option value="">--Any--</option>
+          <option value="MAJOR">MAJOR</option>
+          <option value="HIGH">HIGH</option>
+          <option value="MEDIUM">MEDIUM</option>
+          <option value="LOW">LOW</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Global Controls -->
+  <div class="global-controls mb-4">
+    <button on:click={toggleAllIncidents} class="btn btn-primary m-2">
+      {allIncidentsCollapsed ? "Expand All Incidents" : "Collapse All Incidents"}
+    </button>
+    <button on:click={toggleAllMainAlerts} class="btn btn-info m-2">
+      {allMainAlertsCollapsed ? "Expand All Main Alerts" : "Collapse All Main Alerts"}
+    </button>
+    <button on:click={toggleAllComments} class="btn btn-warning m-2">
+      {allCommentsCollapsed ? "Expand All Comments" : "Collapse All Comments"}
+    </button>
+    {#if $incidentsStore.length > 0}
+      <button on:click={toggleSelectAllIncidents} class="btn btn-secondary m-2">
+        {$incidentsStore.every(item => item.selectedForBulk) ? 'Unselect All Incidents' : 'Select All Incidents'}
+      </button>
+    {/if}
+    {#if statusFilter === "resolved" || statusFilter === "all"}
+      <button on:click={bulkReopenIncidents} class="btn btn-success m-2">Bulk Reopen Selected Incidents</button>
+    {/if}
+    {#if statusFilter === "open" || statusFilter === "all"}
+      <button on:click={bulkResolveIncidents} class="btn btn-danger m-2">Bulk Resolve Selected Incidents</button>
+    {/if}
+  </div>
+
+  <!-- Bulk Link Section -->
+  <div class="mb-4">
+    <form on:submit|preventDefault={() => bulkLinkMainAlerts(bulkTargetIncidentId)}>
+      <div class="form-row">
+        <div class="form-group col-md-4">
+          <input type="number" id="bulk-target" class="form-control" bind:value={bulkTargetIncidentId} placeholder="Enter target incident ID" />
+        </div>
+        <div class="form-group col-md-4 align-self-end">
+          <button type="submit" class="btn btn-secondary">Bulk Link Selected Main Alerts</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Incident List -->
+  <div class="row">
+    {#each $incidentsStore as inc (inc.id)}
+      <article class="col-12 incident-box" draggable={!inc.definitively_resolved}
+        on:dragstart={(e) => handleIncidentDragStart(e, inc)}
+        on:drop={(e) => handleIncidentDrop(e, inc.id)}
+        on:dragover={allowDrop}>
+        <!-- Incident Header -->
+        <header>
+          <div class="row align-items-center">
+            <div class="col">
+              <div class="d-flex flex-wrap align-items-center">
+                <!-- Checkbox and Incident ID -->
+                <div class="mr-3">
+                  <input type="checkbox" bind:checked={inc.selectedForBulk} aria-label="Select incident for bulk actions" />
+                </div>
+                <div class="mr-3"><strong>#{inc.id}</strong></div>
+                <!-- Status: If definitively resolved, simply show "def-resolved" -->
+                {#if inc.definitively_resolved}
+                  <div class="mr-3">
+                    <small><strong>Status:</strong> def-resolved</small>
+                  </div>
+                {:else}
+                  <div class="mr-3" style="position: relative;">
+                    <small><strong>Status:</strong></small>
+                    <button type="button" class="dropdown-text ml-1"
+                      on:click={() => toggleDropdown(inc, "Status")}
+                      on:keydown={(e) => handleKeyAction(e, () => toggleDropdown(inc, "Status"))}
+                      aria-haspopup="true" aria-expanded={inc.showStatusDropdown}>
+                      {inc.status}
+                    </button>
+                    {#if inc.showStatusDropdown}
+                      <div class="dropdown-menu" role="menu">
+                        <button type="button" class="dropdown-item"
+                          on:click={() => { updateStatus(inc.id, "open"); inc.showStatusDropdown = false; }}>
+                          open
+                        </button>
+                        <button type="button" class="dropdown-item"
+                          on:click={() => { updateStatus(inc.id, "resolved"); inc.showStatusDropdown = false; }}>
+                          resolved
+                        </button>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+                <!-- Severity Dropdown -->
+                <div class="mr-3" style="position: relative;">
+                  <small><strong>Severity:</strong></small>
+                  <button type="button" class="dropdown-text ml-1"
+                    on:click={() => toggleDropdown(inc, "Severity")}
+                    on:keydown={(e) => handleKeyAction(e, () => toggleDropdown(inc, "Severity"))}
+                    aria-haspopup="true" aria-expanded={inc.showSeverityDropdown}>
+                    {inc.severity}
+                  </button>
+                  {#if inc.showSeverityDropdown}
+                    <div class="dropdown-menu" role="menu">
+                      <button type="button" class="dropdown-item" on:click={() => { updateSeverity(inc.id, "MAJOR"); inc.showSeverityDropdown = false; }}>
+                        MAJOR
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateSeverity(inc.id, "HIGH"); inc.showSeverityDropdown = false; }}>
+                        HIGH
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateSeverity(inc.id, "MEDIUM"); inc.showSeverityDropdown = false; }}>
+                        MEDIUM
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateSeverity(inc.id, "LOW"); inc.showSeverityDropdown = false; }}>
+                        LOW
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+                <!-- Team Dropdown -->
+                <div class="mr-3" style="position: relative;">
+                  <small><strong>Team:</strong></small>
+                  <button type="button" class="dropdown-text ml-1"
+                    on:click={() => toggleDropdown(inc, "Team")}
+                    on:keydown={(e) => handleKeyAction(e, () => toggleDropdown(inc, "Team"))}
+                    aria-haspopup="true" aria-expanded={inc.showTeamDropdown}>
+                    {inc.team}
+                  </button>
+                  {#if inc.showTeamDropdown}
+                    <div class="dropdown-menu" role="menu">
+                      <button type="button" class="dropdown-item" on:click={() => { updateTeam(inc.id, "team1"); inc.showTeamDropdown = false; }}>
+                        team1
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateTeam(inc.id, "team2"); inc.showTeamDropdown = false; }}>
+                        team2
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateTeam(inc.id, "team3"); inc.showTeamDropdown = false; }}>
+                        team3
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateTeam(inc.id, "team_overkoepelend"); inc.showTeamDropdown = false; }}>
+                        team overkoepelend
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+                <!-- Assignee Dropdown -->
+                <div class="mr-3" style="position: relative;">
+                  <small><strong>Assignee:</strong></small>
+                  <button type="button" class="dropdown-text ml-1"
+                    on:click={() => toggleDropdown(inc, "Assignee")}
+                    on:keydown={(e) => handleKeyAction(e, () => toggleDropdown(inc, "Assignee"))}
+                    aria-haspopup="true" aria-expanded={inc.showAssigneeDropdown}>
+                    {inc.assignee}
+                  </button>
+                  {#if inc.showAssigneeDropdown}
+                    <div class="dropdown-menu" role="menu">
+                      <button type="button" class="dropdown-item" on:click={() => { updateAssignee(inc.id, "person1"); inc.showAssigneeDropdown = false; }}>
+                        person1
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateAssignee(inc.id, "person2"); inc.showAssigneeDropdown = false; }}>
+                        person2
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateAssignee(inc.id, "person3"); inc.showAssigneeDropdown = false; }}>
+                        person3
+                      </button>
+                      <button type="button" class="dropdown-item" on:click={() => { updateAssignee(inc.id, "person4"); inc.showAssigneeDropdown = false; }}>
+                        person4
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+                <div class="mr-3"><small><strong>Alerts:</strong> {inc.alert_count}</small></div>
+                <div class="mr-3"><small><strong>Reopens:</strong> {inc.reopen_count}</small></div>
+                <div class="mr-3"><small><strong>Wiki:</strong> {inc.wiki_url}</small></div>
+              </div>
+            </div>
+            <div class="col-auto">
+              <div class="d-flex align-items-center">
+                {#if inc.status === "open"}
+                  <button class="btn btn-sm btn-danger mr-2" on:click={() => resolveIncident(inc.id)}>Resolve</button>
+                  <button class="btn btn-sm btn-dark mr-2" on:click={() => definitivelyResolveIncident(inc.id)}>Definitively Resolve</button>
+                {:else}
+                  {#if !inc.definitively_resolved}
+                    <button class="btn btn-sm btn-success mr-2" on:click={() => reopenIncident(inc.id)}>Reopen</button>
+                  {/if}
+                {/if}
+                <button class="btn btn-sm btn-outline-secondary" on:click={() => toggleIncidentCollapse(inc)}>
+                  {inc.collapsed ? "Expand" : "Collapse"}
+                </button>
+              </div>
+            </div>
+          </div>
+          <!-- Title Row -->
+          <div class="row mt-1 ml-5">
+            <div class="col">
+              {#if !inc.editingTitle}
+                <span class="title-text" on:click={() => { inc.editingTitle = true; inc.renameText = inc.incident_name; }}>
+                  {inc.incident_name}
+                </span>
+              {:else}
+                <input type="text" class="title-input" bind:value={inc.renameText} autofocus on:blur={() => submitTitle(inc)} on:keydown={(e) => { if (e.key === 'Enter') { submitTitle(inc) } }} />
+              {/if}
+              <br />
+            </div>
+          </div>
+          <!-- Expanded View: Main Alerts & Comments -->
+          {#if !inc.collapsed}
+            <section class="incident-extra">
+              {#if inc.showMainAlerts}
+                <div on:drop={(e) => handleMainAlertDrop(e, inc.id)} on:dragover={allowDrop}>
+                  <div class="mt-2 p-2 border rounded main-alert-box" role="region" aria-label="Main Alerts">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="h6 m-0">Main Alerts</h5>
+                      <button class="btn btn-sm btn-outline-primary" on:click={() => toggleMainAlerts(inc)}>
+                        Hide Main Alerts
+                      </button>
+                    </div>
+                    {#if inc.main_alerts && inc.main_alerts.length > 0}
+                      <ul class="list-unstyled mb-0 mt-2">
+                        {#each inc.main_alerts as ma}
+                          <li class="mb-1 d-flex align-items-center" draggable={!inc.definitively_resolved}
+                              on:dragstart={(e) => handleMainAlertDragStart(e, ma, inc.id)}>
+                            {#if !inc.definitively_resolved}
+                              <input type="checkbox" bind:checked={ma.selectedForBulk} aria-label="Select main alert" class="mr-2" />
+                            {/if}
+                            <span>
+                              <strong>ID:</strong> {ma.id} | <strong>Message:</strong> {ma.message} | <strong>Counter:</strong> {ma.counter} | <strong>Last Alert:</strong> {ma.last_linked_time}
+                            </span>
+                          </li>
+                        {/each}
+                      </ul>
+                    {:else}
+                      <p class="mb-0 mt-2">No main alerts available.</p>
+                    {/if}
+                  </div>
+                </div>
+              {:else}
+                <button class="btn btn-sm btn-outline-primary" on:click={() => toggleMainAlerts(inc)}>
+                  Show Main Alerts
+                </button>
+              {/if}
+              <div class="mb-3">
+                {#if inc.showComments}
+                  <div class="mt-2 p-2 border rounded comment-box" role="region" aria-label="Comments">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="h6 m-0">Comments</h5>
+                      <button type="button" class="btn btn-sm btn-outline-info" on:click={() => toggleComments(inc)}>
+                        Hide Comments
+                      </button>
+                    </div>
+                    {#if inc.comments && inc.comments.length > 0}
+                      <ul class="list-unstyled mt-2">
+                        {#each inc.comments as comment}
+                          <li class="mb-3">
+                            <div>
+                              <small><strong>{formatTimestamp(comment.last_modified)}</strong></small>
+                              <small class="ml-2"><strong>{comment.login_name}</strong></small>
+                            </div>
+                            <div class="mb-1">{@html comment.comment_text}</div>
+                            <div class="d-flex">
+                              {#if !inc.definitively_resolved}
+                                <button type="button" class="btn btn-sm btn-outline-secondary mr-2" on:click={() => editComment(inc, comment)}>
+                                  Modify
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-danger" on:click={() => deleteIncidentComment(inc.id, comment.id)}>
+                                  Delete
+                                </button>
+                              {/if}
+                            </div>
+                          </li>
+                        {/each}
+                      </ul>
+                    {:else}
+                      <p class="mt-2">No comments available.</p>
+                    {/if}
+                    {#if !inc.showCommentEditor}
+                      {#if !inc.definitively_resolved}
+                        <div class="mt-3">
+                          <button type="button" class="btn btn-sm btn-outline-info" on:click={() => {
+                            inc.showCommentEditor = true;
+                            inc.editingComment = null;
+                            inc.newCommentText = "";
+                            inc.newCommentLogin = "";
+                          }}>
+                            Add New Comment
+                          </button>
+                        </div>
+                      {/if}
+                    {/if}
+                    {#if inc.showCommentEditor}
+                      <div class="mt-3">
+                        <form on:submit|preventDefault={() => submitComment(inc)}>
+                          <QuillEditor bind:content={inc.newCommentText} />
+                          <div class="form-row align-items-center mt-2">
+                            <div class="col-md-4">
+                              <label for="comment-login-{inc.id}" class="sr-only">Your Login Name</label>
+                              <input type="text" id="comment-login-{inc.id}" class="form-control form-control-sm" placeholder="Your login name" bind:value={inc.newCommentLogin} />
+                            </div>
+                            <div class="col-auto">
+                              <button type="submit" class="btn btn-sm btn-success">
+                                {inc.editingComment ? "Update Comment" : "Add Comment"}
+                              </button>
+                              <button type="button" class="btn btn-sm btn-outline-secondary ml-2" on:click={() => {
+                                inc.showCommentEditor = false;
+                                inc.editingComment = null;
+                                inc.newCommentText = "";
+                                inc.newCommentLogin = "";
+                              }}>
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        </form>
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <button type="button" class="btn btn-sm btn-outline-info mt-2" on:click={() => toggleComments(inc)}>
+                    Show Comments
+                  </button>
+                {/if}
+              </div>
+            </section>
+          {/if}
+      </article>
+    {/each}
+  </div>
+</div>

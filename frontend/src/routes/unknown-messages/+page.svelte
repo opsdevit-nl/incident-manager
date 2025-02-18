@@ -11,6 +11,14 @@
   // Navbar state
   let showUserMenu = false;
   let darkMode = false;
+  // Declare variables for filters and sorting
+  let statusFilter = 'open';
+  let teamFilter = '';
+  let assigneeFilter = '';
+  let severityFilter = '';
+  let sortBy = 'created';
+  let sortOrder = 'desc';
+
 
   // Filter state – plain text fields for host and sources; date range for start/end dates.
   let hostFilter = "";
@@ -153,7 +161,7 @@
 </script>
 
 <svelte:head>
-  <title>Unknown Messages</title>
+  <title>IIM - Unknown Messages</title>
   <!-- Bootstrap CSS & Bootstrap Icons -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/css/bootstrap.min.css" crossorigin="anonymous" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" crossorigin="anonymous" />
@@ -229,7 +237,7 @@
     <span class="navbar-toggler-icon"></span>
   </button>
   <div class="collapse navbar-collapse" id="navbarContent"> -->
-    <!-- Left navigation links 
+    <!-- Left navigation links
     <ul class="navbar-nav mr-auto">
       <li class="nav-item">
         <a class="nav-link" href="/">Incidents</a>
@@ -238,7 +246,7 @@
         <a class="nav-link" href="/unknown-messages" on:click|preventDefault>Unknown Messages</a>
       </li>
     </ul> -->
-    <!-- Right-side controls 
+    <!-- Right-side controls
     <div class="ml-auto d-flex align-items-center">
       <button on:click={undoAction} class="btn btn-secondary mr-2" aria-label="Undo">
         <i class="bi bi-arrow-counterclockwise"></i>
@@ -313,7 +321,7 @@
       </div>
     </div>
   </form>
-  
+
   <!-- Global Toggle Buttons -->
   <div class="toggle-buttons mb-3">
     <button class="btn btn-primary mr-2" on:click={collapseAllCards}>Collapse All Cards</button>
@@ -325,7 +333,7 @@
       {showAllApps ? 'Hide All Apps' : 'Show All Apps'}
     </button>
   </div>
-  
+
   <!-- Unknown Messages Cards -->
   {#if groupedMessages.length > 0}
     {#each groupedMessages as card (card.error)}

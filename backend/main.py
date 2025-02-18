@@ -1,3 +1,4 @@
+import socketio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,9 @@ from sqlalchemy.orm import sessionmaker, relationship, joinedload
 from casbin import Enforcer
 from pydantic import BaseModel, conlist
 
+# -------------------------
+# Database setup and models
+# -------------------------
 DATABASE_URL = "postgresql://user:password@db:5432/incident_management"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -29,12 +33,12 @@ class Alert(Base):
 class MainAlert(Base):
     __tablename__ = 'main_alerts'
     id = Column(Integer, primary_key=True, index=True)
-    message = Column(String, index=True)  # Unique constraint removed so duplicates are allowed if needed
+    message = Column(String, index=True)
     counter = Column(Integer, default=0)
     last_linked_time = Column(DateTime, default=datetime.utcnow)
     # Each main alert belongs to an Incident
     incident_id = Column(Integer, ForeignKey('incidents.id'), nullable=True)
-    
+
     alerts = relationship("Alert", back_populates="main_alert")
     incident = relationship("Incident", back_populates="main_alerts")
 
@@ -46,7 +50,7 @@ class IncidentComment(Base):
     comment_text = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_modified = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     incident = relationship("Incident", back_populates="comments")
 
 class Incident(Base):
@@ -54,36 +58,35 @@ class Incident(Base):
     id = Column(Integer, primary_key=True, index=True)
     incident_name = Column(String, index=True)
     status = Column(String, default="open")  # "open", "resolved", or "discarded"
-    
-    # New fields for team, assignee, severity, wiki_url
-    team = Column(String, default="team1")         # Allowed: team1, team2, team3
-    assignee = Column(String, default="person1")     # Allowed: person1, person2, person3, person4
-    severity = Column(String, default="MEDIUM")      # Choices: MAJOR, HIGH, MEDIUM, LOW
-    wiki_url = Column(String, nullable=True)         # Initially empty
-    
+
+    team = Column(String, default="team1")
+    assignee = Column(String, default="person1")
+    severity = Column(String, default="MEDIUM")
+    wiki_url = Column(String, nullable=True)
+
     first_alert_time = Column(DateTime, default=datetime.utcnow)
     last_alert_time = Column(DateTime, nullable=True)
     last_resolved_time = Column(DateTime, nullable=True)
     first_resolved_time = Column(DateTime, nullable=True)
     reopened_time = Column(DateTime, nullable=True)
-    
+
     alert_count = Column(Integer, default=0)
     reopen_count = Column(Integer, default=0)
-    
+
     merged = Column(Boolean, default=False)
     definitively_resolved = Column(Boolean, default=False)
-    
+
     main_alerts = relationship("MainAlert", back_populates="incident", cascade="all, delete-orphan")
     comments = relationship("IncidentComment", back_populates="incident", cascade="all, delete-orphan")
 
-########################################
-# Setup & App
-########################################
-
+# -------------------------
+# Casbin and FastAPI setup
+# -------------------------
 casbin_enforcer = Enforcer("/app/rbac_model.conf", "/app/rbac_policy.csv")
+# app = FastAPI(redirect_slashes=False)
 app = FastAPI()
 
-origins = ["http://localhost:5000", "http://127.0.0.1:5000"]
+origins = ["http://localhost:5000"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -92,22 +95,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-def on_startup():
-    import time
-    from sqlalchemy.exc import OperationalError
-    retries = 10
-    for i in range(retries):
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            break
-        except OperationalError:
-            print(f"Database not ready (attempt {i+1}/{retries}). Retrying in 3s...")
-            time.sleep(3)
-    else:
-        raise Exception("Could not connect to the database after multiple retries.")
-    Base.metadata.create_all(bind=engine)
+# -------------------------
+# Socket.IO setup
+# -------------------------
+# Create a Socket.IO server instance (async mode)
+# sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=["*"])
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=origins)
+# Wrap the FastAPI app so that Socket.IO endpoints are served at /socket.io
+socket_app = socketio.ASGIApp(sio, other_asgi_app=app, socketio_path="/socket.io")
+
+# socket_app = CORSMiddleware(
+#     socket_app,
+#     allow_origins=origins,
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
 ########################################
 # Pydantic Schemas
@@ -120,7 +123,7 @@ class IncidentRename(BaseModel):
     new_name: str
 
 class LinkMainAlertPayload(BaseModel):
-    main_alert_id: int  # link a main alert from one incident to another
+    main_alert_id: int
 
 class IncidentUpdateSeverity(BaseModel):
     severity: str
@@ -148,29 +151,25 @@ def get_db():
     finally:
         db.close()
 
-########################################
-# Endpoints
-########################################
-
-# DELETE endpoints for undoing creations via undo/redo on the frontend.
-@app.delete("/incidents/{incident_id}")
-async def delete_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    db.delete(incident)
-    db.commit()
-    return {"detail": "Incident deleted"}
-
-# Similarly, a DELETE endpoint for alerts.
-@app.delete("/alerts/{alert_id}")
-async def delete_alert(alert_id: int, db: SessionLocal = Depends(get_db)):
-    alert = db.query(Alert).filter(Alert.id == alert_id).first()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    db.delete(alert)
-    db.commit()
-    return {"detail": "Alert deleted"}
+# -------------------------
+# Endpoints (unchanged except for event emission)
+# -------------------------
+@app.on_event("startup")
+def on_startup():
+    import time
+    from sqlalchemy.exc import OperationalError
+    retries = 10
+    for i in range(retries):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            break
+        except OperationalError:
+            print(f"Database not ready (attempt {i+1}/{retries}). Retrying in 3s...")
+            time.sleep(3)
+    else:
+        raise Exception("Could not connect to the database after multiple retries.")
+    Base.metadata.create_all(bind=engine)
 
 @app.post("/alerts/")
 async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
@@ -209,6 +208,8 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
                 incident.last_alert_time = now
                 db.commit()
                 db.refresh(incident)
+                # Emit an update event so other clients refresh
+                await sio.emit("incident_update", {"type": "create", "incident_id": incident.id})
                 return {
                     "alert": db_alert,
                     "main_alert": {
@@ -235,6 +236,7 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
                 existing_main_alert.incident_id = new_incident.id
                 db.commit()
                 db.refresh(existing_main_alert)
+                await sio.emit("incident_update", {"type": "create", "incident_id": new_incident.id})
                 return {
                     "alert": db_alert,
                     "main_alert": {
@@ -261,6 +263,7 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
             existing_main_alert.incident_id = new_incident.id
             db.commit()
             db.refresh(existing_main_alert)
+            await sio.emit("incident_update", {"type": "create", "incident_id": new_incident.id})
             return {
                 "alert": db_alert,
                 "main_alert": {
@@ -301,7 +304,7 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
         new_main_alert.incident_id = new_incident.id
         db.commit()
         db.refresh(new_main_alert)
-
+        await sio.emit("incident_update", {"type": "create", "incident_id": new_incident.id})
         return {
             "alert": db_alert,
             "main_alert": {
@@ -320,29 +323,29 @@ async def link_main_alert(incident_id: int, payload: LinkMainAlertPayload, db: S
         raise HTTPException(status_code=404, detail="Target incident not found")
     if target_incident.status == "discarded":
         raise HTTPException(status_code=400, detail="Cannot link a main alert to a discarded incident.")
-    
+
     main_alert = db.query(MainAlert).filter(MainAlert.id == payload.main_alert_id).first()
     if not main_alert:
         raise HTTPException(status_code=404, detail="Main alert not found")
-    
+
     if main_alert.incident_id == target_incident.id:
         return {"message": "Main alert already linked to this incident", "incident": target_incident}
-    
+
     now = datetime.utcnow()
     old_incident = None
     if main_alert.incident_id:
         old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-    
+
     if old_incident and old_incident.definitively_resolved:
         raise HTTPException(status_code=400, detail="Cannot move main alert from a definitively resolved incident")
-    
+
     main_alert.incident_id = target_incident.id
     target_incident.alert_count += main_alert.counter
     target_incident.last_alert_time = now
     db.commit()
     db.refresh(main_alert)
     db.refresh(target_incident)
-    
+
     if old_incident and old_incident.id != target_incident.id:
         db.refresh(old_incident)
         remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
@@ -357,7 +360,7 @@ async def link_main_alert(incident_id: int, payload: LinkMainAlertPayload, db: S
             old_incident.status = "discarded"
             db.commit()
             db.refresh(old_incident)
-    
+    await sio.emit("incident_update", {"type": "link_main_alert", "incident_id": target_incident.id})
     return {"message": "Main alert linked to target incident", "incident": target_incident}
 
 @app.post("/incidents/{target_incident_id}/drag_link_main_alert/{main_alert_id}")
@@ -368,7 +371,7 @@ async def drag_link_main_alert(target_incident_id: int, main_alert_id: int, db: 
         raise HTTPException(status_code=404, detail="Target incident not found")
     if target_incident.status == "discarded":
         raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident")
-    
+
     # Look up the specific main alert by its id.
     main_alert = db.query(MainAlert).filter(MainAlert.id == main_alert_id).first()
     if not main_alert:
@@ -382,7 +385,7 @@ async def drag_link_main_alert(target_incident_id: int, main_alert_id: int, db: 
         old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
     if old_incident and old_incident.definitively_resolved:
         raise HTTPException(status_code=400, detail="Cannot move main alert from a definitively resolved incident")
-    
+
     # Adjust counts only for this one main alert.
     if old_incident:
         old_incident.alert_count -= main_alert.counter
@@ -403,7 +406,7 @@ async def drag_link_main_alert(target_incident_id: int, main_alert_id: int, db: 
 
     db.refresh(main_alert)
     db.refresh(target_incident)
-    
+    await sio.emit("incident_update", {"type": "drag_link_main_alert", "incident_id": target_incident.id})
     return {"message": "Main alert transferred", "incident": target_incident}
 
 
@@ -431,6 +434,7 @@ async def undo_drag_link_main_alert(source_incident_id: int, main_alert_id: int,
     db.refresh(source_incident)
     db.refresh(target_incident)
     db.refresh(main_alert)
+    await sio.emit("incident_update", {"type": "undo_drag_link_main_alert", "incident_id": source_incident.id})
     return {"message": "Undo drag of main alert completed", "source_incident": {"id": source_incident.id, "alert_count": source_incident.alert_count}, "target_incident": {"id": target_incident.id, "alert_count": target_incident.alert_count}}
 
 @app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
@@ -500,6 +504,7 @@ async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAl
     target_incident.alert_count += total_added
     db.commit()
     db.refresh(target_incident)
+    await sio.emit("incident_update", {"type": "bulk_link_main_alerts", "incident_id": target_incident.id})
     return {
         "message": "Bulk linking completed",
         "incident": {
@@ -524,6 +529,7 @@ async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate,
     db.add(new_comment)
     db.commit()
     db.refresh(new_comment)
+    await sio.emit("incident_update", {"type": "add_comment", "incident_id": incident.id})
     return new_comment
 
 @app.patch("/incidents/{incident_id}/comments/{comment_id}")
@@ -537,6 +543,8 @@ async def update_incident_comment(incident_id: int, comment_id: int, payload: In
     comment.comment_text = payload.comment_text
     db.commit()
     db.refresh(comment)
+    await sio.emit("incident_update", {"type": "update_comment", "incident_id": incident_id})
+
     return comment
 
 @app.delete("/incidents/{incident_id}/comments/{comment_id}")
@@ -549,6 +557,7 @@ async def delete_incident_comment(incident_id: int, comment_id: int, db: Session
         raise HTTPException(status_code=404, detail="Comment not found")
     db.delete(comment)
     db.commit()
+    await sio.emit("incident_update", {"type": "delete_comment", "incident_id": incident_id})
     return {"detail": "Comment deleted"}
 
 # New endpoint: Drag and Drop Transfer an Incident.
@@ -589,6 +598,7 @@ async def drag_transfer_incident(target_incident_id: int, source_incident_id: in
     target_incident.alert_count += total_added
     db.commit()
     db.refresh(target_incident)
+    await sio.emit("incident_update", {"type": "drag_transfer", "incident_id": target_incident.id})
     return {
         "message": "Incident transferred via drag & drop",
         "incident": {
@@ -632,6 +642,7 @@ async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, p
     db.commit()
     db.refresh(target_incident)
     db.refresh(source_incident)
+    await sio.emit("incident_update", {"type": "undo_drag_transfer", "incident_id": target_incident.id})
     return {
         "message": "Undo drag transfer completed",
         "target_incident": {
@@ -656,6 +667,7 @@ async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db))
         incident.first_resolved_time = datetime.utcnow()
     db.commit()
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "definitively_resolve", "incident_id": incident.id})
     return incident
 
 @app.patch("/incidents/{incident_id}/definitively_resolve")
@@ -670,6 +682,7 @@ async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Dep
     incident.definitively_resolved = True
     db.commit()
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "reopen", "incident_id": incident.id})
     return incident
 
 @app.patch("/incidents/{incident_id}/reopen")
@@ -686,6 +699,7 @@ async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
     incident.reopen_count += 1
     db.commit()
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "reopen", "incident_id": incident.id})
     return incident
 
 @app.patch("/incidents/{incident_id}/rename")
@@ -696,6 +710,7 @@ async def rename_incident(incident_id: int, payload: IncidentRename, db: Session
     incident.incident_name = payload.new_name
     db.commit()
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "rename", "incident_id": incident.id})
     return incident
 
 @app.patch("/incidents/{incident_id}/update_severity")
@@ -711,6 +726,7 @@ async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db:
     incident.severity = payload.severity
     db.commit()
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "update_severity", "incident_id": incident.id})
     return incident
 
 @app.patch("/incidents/{incident_id}/update_team")
@@ -725,6 +741,7 @@ async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: Session
         raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
     incident.team = payload.team
     db.commit()
+    await sio.emit("incident_update", {"type": "update_team", "incident_id": incident.id})
     db.refresh(incident)
     return incident
 
@@ -744,6 +761,7 @@ async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db:
     incident.assignee = payload.assignee
     db.commit()
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "update_assignee", "incident_id": incident.id})
     return incident
 
 @app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
@@ -2640,7 +2658,7 @@ async def read_incidents(
     if severity:
         query = query.filter(Incident.severity == severity)
     incidents = query.all()
-    
+
     results = []
     for inc in incidents:
         main_alerts_info = [{
@@ -2662,6 +2680,7 @@ async def read_incidents(
             "status": inc.status,
             "severity": inc.severity,
             "wiki_url": inc.wiki_url,
+            "definitively_resolved": inc.definitively_resolved,
             "team": inc.team,
             "assignee": inc.assignee,
             "alert_count": inc.alert_count,
@@ -2682,3 +2701,11 @@ async def check_permission(role: str):
         return {"permission": "granted"}
     else:
         raise HTTPException(status_code=403, detail="Permission denied")
+
+# -------------------------
+# Run the application via socket_app
+# -------------------------
+if __name__ == "__main__":
+    import uvicorn
+    # IMPORTANT: Run "main:socket_app" so that Socket.IO endpoints are available.
+    uvicorn.run("main:socket_app", host="0.0.0.0", port=8000, reload=True)

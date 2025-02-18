@@ -1,5 +1,7 @@
 fastapi
 uvicorn
+python-socketio[asyncio]
+python-engineio
 psycopg2-binary
 sqlalchemy
 casbin
