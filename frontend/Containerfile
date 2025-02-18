@@ -1,0 +1,38 @@
+# Use Node 18 slim
+FROM node:18-slim
+
+# Set working directory
+WORKDIR /app
+
+# Copy all project files
+# COPY ./package.json /app/package.json
+COPY ./package.json /app/
+
+# Ensure proper permissions
+RUN chmod -R 755 /app
+
+# Set environment to development
+ENV NODE_ENV=development
+
+# Remove previous node_modules (if any)
+RUN rm -rf node_modules package-lock.json
+
+# Install dependencies
+RUN npm cache clean --force
+
+# RUN npm init svelte my-first-svelte-app
+#  RUN npm create svelte@latest /app/
+# RUN yes | npx sv create --no-add-ons  /app --template minimal --no-types --no-install
+
+RUN npm install
+
+RUN npm install quill 
+
+# Run svelte-kit sync to generate type definitions and internal files
+# RUN npm run sync
+
+# Expose port 5000 (as set in vite.config.js)
+EXPOSE 5000
+
+# Start the dev server using the local svelte-kit binary
+CMD ["npm", "run", "dev"]

@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: incident_management
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Containerfile  # or your correct file name
+    container_name: backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app:Z
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/incident_management
+    depends_on:
+      - db
+    networks:
+      - app_network
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Containerfile  # or your correct file name
+    container_name: frontend
+    environment:
+      - NODE_ENV=development
+    ports:
+      - "5000:5000"
+    volumes:
+    - ./frontend/src:/app/src:Z
+    - ./frontend/static:/app/static:Z
+    - ./frontend/svelte.config.js:/app/svelte.config.js:Z
+    - ./frontend/vite.config.js:/app/vite.config.js:Z
+    - ./frontend/app.html:/app/app.html:Z
+    - /app/node_modules
+# volumes:
+#  - ./frontend:/app:Z
+#  - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - app_network
+
+ 
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
