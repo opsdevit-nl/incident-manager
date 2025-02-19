@@ -1,0 +1,2 @@
+admin, /incidents, create
+user, /incidents, read
