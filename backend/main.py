@@ -16,14 +16,14 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-########################################
-# Models
-########################################
-
 class Alert(Base):
     __tablename__ = 'alerts'
     id = Column(Integer, primary_key=True, index=True)
-    alert_name = Column(String)
+    message = Column(String)
+    source = Column(String)
+    host = Column(String)
+    state = Column(Integer)
+    wikilink = Column(String)
     status = Column(String, default="new")
     created_at = Column(DateTime, default=datetime.utcnow)
     # Link to a MainAlert
@@ -34,11 +34,14 @@ class MainAlert(Base):
     __tablename__ = 'main_alerts'
     id = Column(Integer, primary_key=True, index=True)
     message = Column(String, index=True)
+    source = Column(String)
+    host = Column(String)
+    state = Column(Integer)
+    wikilink = Column(String)
     counter = Column(Integer, default=0)
     last_linked_time = Column(DateTime, default=datetime.utcnow)
     # Each main alert belongs to an Incident
     incident_id = Column(Integer, ForeignKey('incidents.id'), nullable=True)
-
     alerts = relationship("Alert", back_populates="main_alert")
     incident = relationship("Incident", back_populates="main_alerts")
 
@@ -50,7 +53,6 @@ class IncidentComment(Base):
     comment_text = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_modified = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
     incident = relationship("Incident", back_populates="comments")
 
 class Incident(Base):
@@ -58,24 +60,22 @@ class Incident(Base):
     id = Column(Integer, primary_key=True, index=True)
     incident_name = Column(String, index=True)
     status = Column(String, default="open")  # "open", "resolved", or "discarded"
-
     team = Column(String, default="team1")
     assignee = Column(String, default="person1")
     severity = Column(String, default="MEDIUM")
-    wiki_url = Column(String, nullable=True)
-
+    wikilink = Column(String, nullable=True)
+    source = Column(String, nullable=True)
+    host = Column(String, nullable=True)
+    state = Column(Integer, nullable=True)
     first_alert_time = Column(DateTime, default=datetime.utcnow)
     last_alert_time = Column(DateTime, nullable=True)
     last_resolved_time = Column(DateTime, nullable=True)
     first_resolved_time = Column(DateTime, nullable=True)
     reopened_time = Column(DateTime, nullable=True)
-
     alert_count = Column(Integer, default=0)
     reopen_count = Column(Integer, default=0)
-
     merged = Column(Boolean, default=False)
     definitively_resolved = Column(Boolean, default=False)
-
     main_alerts = relationship("MainAlert", back_populates="incident", cascade="all, delete-orphan")
     comments = relationship("IncidentComment", back_populates="incident", cascade="all, delete-orphan")
 
@@ -83,9 +83,7 @@ class Incident(Base):
 # Casbin and FastAPI setup
 # -------------------------
 casbin_enforcer = Enforcer("/app/rbac_model.conf", "/app/rbac_policy.csv")
-# app = FastAPI(redirect_slashes=False)
 app = FastAPI()
-
 origins = ["http://localhost:5000"]
 app.add_middleware(
     CORSMiddleware,
@@ -94,30 +92,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# -------------------------
-# Socket.IO setup
-# -------------------------
-# Create a Socket.IO server instance (async mode)
-# sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=["*"])
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=origins)
-# Wrap the FastAPI app so that Socket.IO endpoints are served at /socket.io
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app, socketio_path="/socket.io")
 
-# socket_app = CORSMiddleware(
-#     socket_app,
-#     allow_origins=origins,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-########################################
+# -------------------------
 # Pydantic Schemas
-########################################
-
+# -------------------------
 class AlertCreate(BaseModel):
-    alert_name: str
+    message: str
+    source: str
+    host: str
+    wikilink: str
+    state: int
 
 class IncidentRename(BaseModel):
     new_name: str
@@ -131,9 +117,6 @@ class IncidentUpdateSeverity(BaseModel):
 class IncidentUpdateTeam(BaseModel):
     team: str
 
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
 class IncidentCommentCreate(BaseModel):
     login_name: str
     comment_text: str
@@ -144,6 +127,9 @@ class IncidentCommentUpdate(BaseModel):
 class BulkLinkMainAlertsPayload(BaseModel):
     main_alert_ids: conlist(int, min_length=1)
 
+class IncidentUpdateAssignee(BaseModel):
+    assignee: str
+
 def get_db():
     db = SessionLocal()
     try:
@@ -152,7 +138,7 @@ def get_db():
         db.close()
 
 # -------------------------
-# Endpoints (unchanged except for event emission)
+# Startup event
 # -------------------------
 @app.on_event("startup")
 def on_startup():
@@ -171,10 +157,19 @@ def on_startup():
         raise Exception("Could not connect to the database after multiple retries.")
     Base.metadata.create_all(bind=engine)
 
+# -------------------------
+# Endpoints
+# -------------------------
 @app.post("/alerts/")
 async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
     now = datetime.utcnow()
-    db_alert = Alert(alert_name=alert.alert_name)
+    db_alert = Alert(
+        message=alert.message,
+        source=alert.source,
+        host=alert.host,
+        state=alert.state,
+        wikilink=alert.wikilink
+    )
     db.add(db_alert)
     db.commit()
     db.refresh(db_alert)
@@ -183,7 +178,11 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
         db.query(MainAlert)
         .join(Incident, isouter=True)
         .filter(
-            MainAlert.message == alert.alert_name,
+            MainAlert.message == alert.message,
+            MainAlert.source == alert.source,
+            MainAlert.host == alert.host,
+            MainAlert.wikilink == alert.wikilink,
+            MainAlert.state == alert.state,
             ((Incident.id.is_(None)) | (Incident.definitively_resolved == False))
         )
         .first()
@@ -208,7 +207,6 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
                 incident.last_alert_time = now
                 db.commit()
                 db.refresh(incident)
-                # Emit an update event so other clients refresh
                 await sio.emit("incident_update", {"type": "create", "incident_id": incident.id})
                 return {
                     "alert": db_alert,
@@ -222,11 +220,14 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
                 }
             else:
                 new_incident = Incident(
-                    incident_name=alert.alert_name,
+                    incident_name=alert.message,
                     status="open",
                     alert_count=1,
                     severity="MEDIUM",
-                    wiki_url="",
+                    wikilink=alert.wikilink,
+                    source=alert.source,
+                    host=alert.host,
+                    state=alert.state,
                     first_alert_time=now,
                     last_alert_time=now,
                 )
@@ -249,11 +250,14 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
                 }
         else:
             new_incident = Incident(
-                incident_name=alert.alert_name,
+                incident_name=alert.message,
                 status="open",
                 alert_count=1,
                 severity="MEDIUM",
-                wiki_url="",
+                wikilink=alert.wikilink,
+                source=alert.source,
+                host=alert.host,
+                state=alert.state,
                 first_alert_time=now,
                 last_alert_time=now,
             )
@@ -276,7 +280,11 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
             }
     else:
         new_main_alert = MainAlert(
-            message=alert.alert_name,
+            message=alert.message,
+            source=alert.source,
+            host=alert.host,
+            state=alert.state,
+            wikilink=alert.wikilink,
             counter=1,
             last_linked_time=now,
         )
@@ -289,11 +297,14 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
         db.refresh(db_alert)
 
         new_incident = Incident(
-            incident_name=alert.alert_name,
+            incident_name=alert.message,
             status="open",
             alert_count=1,
             severity="MEDIUM",
-            wiki_url="",
+            wikilink=alert.wikilink,
+            source=alert.source,
+            host=alert.host,
+            state=alert.state,
             first_alert_time=now,
             last_alert_time=now,
         )
@@ -365,14 +376,12 @@ async def link_main_alert(incident_id: int, payload: LinkMainAlertPayload, db: S
 
 @app.post("/incidents/{target_incident_id}/drag_link_main_alert/{main_alert_id}")
 async def drag_link_main_alert(target_incident_id: int, main_alert_id: int, db: SessionLocal = Depends(get_db)):
-    # Get target incident and ensure it exists and is allowed
     target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
     if not target_incident:
         raise HTTPException(status_code=404, detail="Target incident not found")
     if target_incident.status == "discarded":
         raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident")
 
-    # Look up the specific main alert by its id.
     main_alert = db.query(MainAlert).filter(MainAlert.id == main_alert_id).first()
     if not main_alert:
         raise HTTPException(status_code=404, detail="Main alert not found")
@@ -386,33 +395,24 @@ async def drag_link_main_alert(target_incident_id: int, main_alert_id: int, db: 
     if old_incident and old_incident.definitively_resolved:
         raise HTTPException(status_code=400, detail="Cannot move main alert from a definitively resolved incident")
 
-    # Adjust counts only for this one main alert.
     if old_incident:
         old_incident.alert_count -= main_alert.counter
     target_incident.alert_count += main_alert.counter
     target_incident.last_alert_time = now
     main_alert.incident_id = target_incident.id
-
     db.commit()
     db.refresh(main_alert)
     db.refresh(target_incident)
     if old_incident:
         db.refresh(old_incident)
-    remaining_alerts = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-    if remaining_alerts == 0:
-        old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    db.refresh(main_alert)
-    db.refresh(target_incident)
+        remaining_alerts = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
+        if remaining_alerts == 0:
+            old_incident.status = "discarded"
+            db.commit()
+            db.refresh(old_incident)
     await sio.emit("incident_update", {"type": "drag_link_main_alert", "incident_id": target_incident.id})
     return {"message": "Main alert transferred", "incident": target_incident}
 
-
-
-
-# NEW: Endpoint to undo drag of a single main alert.
 @app.post("/incidents/{source_incident_id}/undo_drag_link_main_alert/{main_alert_id}")
 async def undo_drag_link_main_alert(source_incident_id: int, main_alert_id: int, db: SessionLocal = Depends(get_db)):
     source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
@@ -427,7 +427,6 @@ async def undo_drag_link_main_alert(source_incident_id: int, main_alert_id: int,
     main_alert.incident_id = source_incident.id
     target_incident.alert_count -= main_alert.counter
     source_incident.alert_count += main_alert.counter
-    # Ensure source incident is reopened if it was discarded or resolved.
     if source_incident.status in ("discarded", "resolved"):
         source_incident.status = "open"
     db.commit()
@@ -435,7 +434,11 @@ async def undo_drag_link_main_alert(source_incident_id: int, main_alert_id: int,
     db.refresh(target_incident)
     db.refresh(main_alert)
     await sio.emit("incident_update", {"type": "undo_drag_link_main_alert", "incident_id": source_incident.id})
-    return {"message": "Undo drag of main alert completed", "source_incident": {"id": source_incident.id, "alert_count": source_incident.alert_count}, "target_incident": {"id": target_incident.id, "alert_count": target_incident.alert_count}}
+    return {
+        "message": "Undo drag of main alert completed",
+        "source_incident": {"id": source_incident.id, "alert_count": source_incident.alert_count},
+        "target_incident": {"id": target_incident.id, "alert_count": target_incident.alert_count}
+    }
 
 @app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
 async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
@@ -484,10 +487,7 @@ async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAl
         if not old_incident:
             continue
         for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
+            exists = any(c.comment_text == comment.comment_text and c.login_name == comment.login_name for c in target_incident.comments)
             if not exists:
                 new_comment = IncidentComment(
                     incident_id=target_incident.id,
@@ -544,7 +544,6 @@ async def update_incident_comment(incident_id: int, comment_id: int, payload: In
     db.commit()
     db.refresh(comment)
     await sio.emit("incident_update", {"type": "update_comment", "incident_id": incident_id})
-
     return comment
 
 @app.delete("/incidents/{incident_id}/comments/{comment_id}")
@@ -560,7 +559,6 @@ async def delete_incident_comment(incident_id: int, comment_id: int, db: Session
     await sio.emit("incident_update", {"type": "delete_comment", "incident_id": incident_id})
     return {"detail": "Comment deleted"}
 
-# New endpoint: Drag and Drop Transfer an Incident.
 @app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
 async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
     target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
@@ -583,10 +581,7 @@ async def drag_transfer_incident(target_incident_id: int, source_incident_id: in
             "last_linked_time": ma.last_linked_time
         })
     for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
+        exists = any(c.comment_text == comment.comment_text and c.login_name == comment.login_name for c in target_incident.comments)
         if not exists:
             new_comment = IncidentComment(
                 incident_id=target_incident.id,
@@ -610,7 +605,6 @@ async def drag_transfer_incident(target_incident_id: int, source_incident_id: in
         "moved_main_alerts": moved_alerts
     }
 
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
 @app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
 async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
     target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
@@ -636,7 +630,6 @@ async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, p
         for t_comment in list(target_incident.comments):
             if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
                 db.delete(t_comment)
-    # Ensure that if the source incident was discarded or resolved, it is reopened.
     if source_incident.status in ("discarded", "resolved"):
         source_incident.status = "open"
     db.commit()
@@ -741,12 +734,9 @@ async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: Session
         raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
     incident.team = payload.team
     db.commit()
-    await sio.emit("incident_update", {"type": "update_team", "incident_id": incident.id})
     db.refresh(incident)
+    await sio.emit("incident_update", {"type": "update_team", "incident_id": incident.id})
     return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
 
 @app.patch("/incidents/{incident_id}/update_assignee")
 async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
@@ -762,1879 +752,6 @@ async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db:
     db.commit()
     db.refresh(incident)
     await sio.emit("incident_update", {"type": "update_assignee", "incident_id": incident.id})
-    return incident
-
-@app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
-async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    if not target_incident:
-        raise HTTPException(status_code=404, detail="Target incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
-
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    transferred_from_incidents = set()
-
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if not main_alert:
-            continue
-        if main_alert.incident_id == target_incident.id:
-            continue
-
-        old_incident = None
-        if main_alert.incident_id:
-            old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-
-        if old_incident and old_incident.definitively_resolved:
-            continue
-
-        main_alert.incident_id = target_incident.id
-        total_added += main_alert.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": main_alert.id,
-            "message": main_alert.message,
-            "counter": main_alert.counter,
-            "last_linked_time": main_alert.last_linked_time,
-        })
-        db.commit()
-        db.refresh(main_alert)
-
-        if old_incident and old_incident.id != target_incident.id:
-            transferred_from_incidents.add(old_incident.id)
-
-    for old_incident_id in transferred_from_incidents:
-        old_incident = db.query(Incident).filter(Incident.id == old_incident_id).first()
-        if not old_incident:
-            continue
-        for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
-            if not exists:
-                new_comment = IncidentComment(
-                    incident_id=target_incident.id,
-                    login_name=comment.login_name,
-                    comment_text=comment.comment_text
-                )
-                db.add(new_comment)
-        remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-        if remaining == 0 and not old_incident.definitively_resolved:
-            old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Bulk linking completed",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-@app.post("/incidents/{incident_id}/comments/")
-async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    new_comment = IncidentComment(
-        incident_id=incident_id,
-        login_name=comment.login_name,
-        comment_text=comment.comment_text
-    )
-    db.add(new_comment)
-    db.commit()
-    db.refresh(new_comment)
-    return new_comment
-
-@app.patch("/incidents/{incident_id}/comments/{comment_id}")
-async def update_incident_comment(incident_id: int, comment_id: int, payload: IncidentCommentUpdate, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    comment.comment_text = payload.comment_text
-    db.commit()
-    db.refresh(comment)
-    return comment
-
-@app.delete("/incidents/{incident_id}/comments/{comment_id}")
-async def delete_incident_comment(incident_id: int, comment_id: int, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    db.delete(comment)
-    db.commit()
-    return {"detail": "Comment deleted"}
-
-# New endpoint: Drag and Drop Transfer an Incident.
-@app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
-async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    for ma in source_incident.main_alerts:
-        ma.incident_id = target_incident.id
-        total_added += ma.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": ma.id,
-            "message": ma.message,
-            "counter": ma.counter,
-            "last_linked_time": ma.last_linked_time
-        })
-    for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
-        if not exists:
-            new_comment = IncidentComment(
-                incident_id=target_incident.id,
-                login_name=comment.login_name,
-                comment_text=comment.comment_text
-            )
-            db.add(new_comment)
-    source_incident.status = "discarded"
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Incident transferred via drag & drop",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
-@app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
-async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    total_removed = 0
-    moved_alerts = []
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if main_alert and main_alert.incident_id == target_incident.id:
-            main_alert.incident_id = source_incident.id
-            total_removed += main_alert.counter
-            moved_alerts.append({
-                "id": main_alert.id,
-                "message": main_alert.message,
-                "counter": main_alert.counter,
-                "last_linked_time": main_alert.last_linked_time,
-            })
-    target_incident.alert_count -= total_removed
-    source_incident.alert_count += total_removed
-    for comment in source_incident.comments:
-        for t_comment in list(target_incident.comments):
-            if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
-                db.delete(t_comment)
-    # Ensure that if the source incident was closed (discarded or resolved), we set it to open.
-    if source_incident.status in ("discarded", "resolved"):
-        source_incident.status = "open"
-    db.commit()
-    db.refresh(target_incident)
-    db.refresh(source_incident)
-    return {
-        "message": "Undo drag transfer completed",
-        "target_incident": {
-            "id": target_incident.id,
-            "alert_count": target_incident.alert_count
-        },
-        "source_incident": {
-            "id": source_incident.id,
-            "alert_count": source_incident.alert_count
-        },
-        "moved_alerts": moved_alerts
-    }
-
-@app.patch("/incidents/{incident_id}/resolve")
-async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/definitively_resolve")
-async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    incident.definitively_resolved = True
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/reopen")
-async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.definitively_resolved:
-        raise HTTPException(status_code=400, detail="Incident is definitively resolved and cannot be reopened.")
-    if incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
-    incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
-    incident.reopen_count += 1
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/rename")
-async def rename_incident(incident_id: int, payload: IncidentRename, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.incident_name = payload.new_name
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_severity")
-async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db: SessionLocal = Depends(get_db)):
-    allowed = {"MAJOR", "HIGH", "MEDIUM", "LOW"}
-    if payload.severity not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid severity value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Severity can only be updated on open incidents.")
-    incident.severity = payload.severity
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_team")
-async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: SessionLocal = Depends(get_db)):
-    allowed_teams = {"team1", "team2", "team3", "team_overkoepelend"}
-    if payload.team not in allowed_teams:
-        raise HTTPException(status_code=400, detail="Invalid team value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    # if incident.status != "open":
-    #     raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
-    incident.team = payload.team
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
-@app.patch("/incidents/{incident_id}/update_assignee")
-async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
-    allowed_assignees = {"person1", "person2", "person3", "person4"}
-    if payload.assignee not in allowed_assignees:
-        raise HTTPException(status_code=400, detail="Invalid assignee value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Assignee can only be updated on open incidents.")
-    incident.assignee = payload.assignee
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
-async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    if not target_incident:
-        raise HTTPException(status_code=404, detail="Target incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
-
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    transferred_from_incidents = set()
-
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if not main_alert:
-            continue
-        if main_alert.incident_id == target_incident.id:
-            continue
-
-        old_incident = None
-        if main_alert.incident_id:
-            old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-
-        if old_incident and old_incident.definitively_resolved:
-            continue
-
-        main_alert.incident_id = target_incident.id
-        total_added += main_alert.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": main_alert.id,
-            "message": main_alert.message,
-            "counter": main_alert.counter,
-            "last_linked_time": main_alert.last_linked_time,
-        })
-        db.commit()
-        db.refresh(main_alert)
-
-        if old_incident and old_incident.id != target_incident.id:
-            transferred_from_incidents.add(old_incident.id)
-
-    for old_incident_id in transferred_from_incidents:
-        old_incident = db.query(Incident).filter(Incident.id == old_incident_id).first()
-        if not old_incident:
-            continue
-        for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
-            if not exists:
-                new_comment = IncidentComment(
-                    incident_id=target_incident.id,
-                    login_name=comment.login_name,
-                    comment_text=comment.comment_text
-                )
-                db.add(new_comment)
-        remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-        if remaining == 0 and not old_incident.definitively_resolved:
-            old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Bulk linking completed",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-@app.post("/incidents/{incident_id}/comments/")
-async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    new_comment = IncidentComment(
-        incident_id=incident_id,
-        login_name=comment.login_name,
-        comment_text=comment.comment_text
-    )
-    db.add(new_comment)
-    db.commit()
-    db.refresh(new_comment)
-    return new_comment
-
-@app.patch("/incidents/{incident_id}/comments/{comment_id}")
-async def update_incident_comment(incident_id: int, comment_id: int, payload: IncidentCommentUpdate, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    comment.comment_text = payload.comment_text
-    db.commit()
-    db.refresh(comment)
-    return comment
-
-@app.delete("/incidents/{incident_id}/comments/{comment_id}")
-async def delete_incident_comment(incident_id: int, comment_id: int, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    db.delete(comment)
-    db.commit()
-    return {"detail": "Comment deleted"}
-
-# New endpoint: Drag and Drop Transfer an Incident.
-@app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
-async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    for ma in source_incident.main_alerts:
-        ma.incident_id = target_incident.id
-        total_added += ma.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": ma.id,
-            "message": ma.message,
-            "counter": ma.counter,
-            "last_linked_time": ma.last_linked_time
-        })
-    for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
-        if not exists:
-            new_comment = IncidentComment(
-                incident_id=target_incident.id,
-                login_name=comment.login_name,
-                comment_text=comment.comment_text
-            )
-            db.add(new_comment)
-    source_incident.status = "discarded"
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Incident transferred via drag & drop",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
-@app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
-async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    total_removed = 0
-    moved_alerts = []
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if main_alert and main_alert.incident_id == target_incident.id:
-            main_alert.incident_id = source_incident.id
-            total_removed += main_alert.counter
-            moved_alerts.append({
-                "id": main_alert.id,
-                "message": main_alert.message,
-                "counter": main_alert.counter,
-                "last_linked_time": main_alert.last_linked_time,
-            })
-    target_incident.alert_count -= total_removed
-    source_incident.alert_count += total_removed
-    for comment in source_incident.comments:
-        for t_comment in list(target_incident.comments):
-            if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
-                db.delete(t_comment)
-    if source_incident.status in ("discarded", "resolved"):
-        source_incident.status = "open"
-    db.commit()
-    db.refresh(target_incident)
-    db.refresh(source_incident)
-    return {
-        "message": "Undo drag transfer completed",
-        "target_incident": {
-            "id": target_incident.id,
-            "alert_count": target_incident.alert_count
-        },
-        "source_incident": {
-            "id": source_incident.id,
-            "alert_count": source_incident.alert_count
-        },
-        "moved_alerts": moved_alerts
-    }
-
-@app.patch("/incidents/{incident_id}/resolve")
-async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/definitively_resolve")
-async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    incident.definitively_resolved = True
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/reopen")
-async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.definitively_resolved:
-        raise HTTPException(status_code=400, detail="Incident is definitively resolved and cannot be reopened.")
-    if incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
-    incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
-    incident.reopen_count += 1
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/rename")
-async def rename_incident(incident_id: int, payload: IncidentRename, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.incident_name = payload.new_name
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_severity")
-async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db: SessionLocal = Depends(get_db)):
-    allowed = {"MAJOR", "HIGH", "MEDIUM", "LOW"}
-    if payload.severity not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid severity value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    # if incident.status != "open":
-    #     raise HTTPException(status_code=400, detail="Severity can only be updated on open incidents.")
-    incident.severity = payload.severity
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_team")
-async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: SessionLocal = Depends(get_db)):
-    allowed_teams = {"team1", "team2", "team3"}
-    if payload.team not in allowed_teams:
-        raise HTTPException(status_code=400, detail="Invalid team value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    # if incident.status != "open":
-    #     raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
-    incident.team = payload.team
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
-@app.patch("/incidents/{incident_id}/update_assignee")
-async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
-    allowed_assignees = {"person1", "person2", "person3", "person4"}
-    if payload.assignee not in allowed_assignees:
-        raise HTTPException(status_code=400, detail="Invalid assignee value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    # if incident.status != "open":
-    #     raise HTTPException(status_code=400, detail="Assignee can only be updated on open incidents.")
-    incident.assignee = payload.assignee
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
-async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    if not target_incident:
-        raise HTTPException(status_code=404, detail="Target incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
-
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    transferred_from_incidents = set()
-
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if not main_alert:
-            continue
-        if main_alert.incident_id == target_incident.id:
-            continue
-
-        old_incident = None
-        if main_alert.incident_id:
-            old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-
-        if old_incident and old_incident.definitively_resolved:
-            continue
-
-        main_alert.incident_id = target_incident.id
-        total_added += main_alert.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": main_alert.id,
-            "message": main_alert.message,
-            "counter": main_alert.counter,
-            "last_linked_time": main_alert.last_linked_time,
-        })
-        db.commit()
-        db.refresh(main_alert)
-
-        if old_incident and old_incident.id != target_incident.id:
-            transferred_from_incidents.add(old_incident.id)
-
-    for old_incident_id in transferred_from_incidents:
-        old_incident = db.query(Incident).filter(Incident.id == old_incident_id).first()
-        if not old_incident:
-            continue
-        for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
-            if not exists:
-                new_comment = IncidentComment(
-                    incident_id=target_incident.id,
-                    login_name=comment.login_name,
-                    comment_text=comment.comment_text
-                )
-                db.add(new_comment)
-        remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-        if remaining == 0 and not old_incident.definitively_resolved:
-            old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Bulk linking completed",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-@app.post("/incidents/{incident_id}/comments/")
-async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    new_comment = IncidentComment(
-        incident_id=incident_id,
-        login_name=comment.login_name,
-        comment_text=comment.comment_text
-    )
-    db.add(new_comment)
-    db.commit()
-    db.refresh(new_comment)
-    return new_comment
-
-@app.patch("/incidents/{incident_id}/comments/{comment_id}")
-async def update_incident_comment(incident_id: int, comment_id: int, payload: IncidentCommentUpdate, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    comment.comment_text = payload.comment_text
-    db.commit()
-    db.refresh(comment)
-    return comment
-
-@app.delete("/incidents/{incident_id}/comments/{comment_id}")
-async def delete_incident_comment(incident_id: int, comment_id: int, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    db.delete(comment)
-    db.commit()
-    return {"detail": "Comment deleted"}
-
-# New endpoint: Drag and Drop Transfer an Incident.
-@app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
-async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    # if target_incident.status == "discarded":
-    #     raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    for ma in source_incident.main_alerts:
-        ma.incident_id = target_incident.id
-        total_added += ma.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": ma.id,
-            "message": ma.message,
-            "counter": ma.counter,
-            "last_linked_time": ma.last_linked_time
-        })
-    for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
-        if not exists:
-            new_comment = IncidentComment(
-                incident_id=target_incident.id,
-                login_name=comment.login_name,
-                comment_text=comment.comment_text
-            )
-            db.add(new_comment)
-    source_incident.status = "discarded"
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Incident transferred via drag & drop",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
-@app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
-async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    total_removed = 0
-    moved_alerts = []
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if main_alert and main_alert.incident_id == target_incident.id:
-            main_alert.incident_id = source_incident.id
-            total_removed += main_alert.counter
-            moved_alerts.append({
-                "id": main_alert.id,
-                "message": main_alert.message,
-                "counter": main_alert.counter,
-                "last_linked_time": main_alert.last_linked_time,
-            })
-    target_incident.alert_count -= total_removed
-    source_incident.alert_count += total_removed
-    for comment in source_incident.comments:
-        for t_comment in list(target_incident.comments):
-            if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
-                db.delete(t_comment)
-    if source_incident.status in ("discarded", "resolved"):
-        source_incident.status = "open"
-    db.commit()
-    db.refresh(target_incident)
-    db.refresh(source_incident)
-    return {
-        "message": "Undo drag transfer completed",
-        "target_incident": {
-            "id": target_incident.id,
-            "alert_count": target_incident.alert_count
-        },
-        "source_incident": {
-            "id": source_incident.id,
-            "alert_count": source_incident.alert_count
-        },
-        "moved_alerts": moved_alerts
-    }
-
-@app.patch("/incidents/{incident_id}/resolve")
-async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/definitively_resolve")
-async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    incident.definitively_resolved = True
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/reopen")
-async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.definitively_resolved:
-        raise HTTPException(status_code=400, detail="Incident is definitively resolved and cannot be reopened.")
-    if incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
-    incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
-    incident.reopen_count += 1
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/rename")
-async def rename_incident(incident_id: int, payload: IncidentRename, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.incident_name = payload.new_name
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_severity")
-async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db: SessionLocal = Depends(get_db)):
-    allowed = {"MAJOR", "HIGH", "MEDIUM", "LOW"}
-    if payload.severity not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid severity value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Severity can only be updated on open incidents.")
-    incident.severity = payload.severity
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_team")
-async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: SessionLocal = Depends(get_db)):
-    allowed_teams = {"team1", "team2", "team3"}
-    if payload.team not in allowed_teams:
-        raise HTTPException(status_code=400, detail="Invalid team value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
-    incident.team = payload.team
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
-@app.patch("/incidents/{incident_id}/update_assignee")
-async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
-    allowed_assignees = {"person1", "person2", "person3", "person4"}
-    if payload.assignee not in allowed_assignees:
-        raise HTTPException(status_code=400, detail="Invalid assignee value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Assignee can only be updated on open incidents.")
-    incident.assignee = payload.assignee
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
-async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    if not target_incident:
-        raise HTTPException(status_code=404, detail="Target incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
-
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    transferred_from_incidents = set()
-
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if not main_alert:
-            continue
-        if main_alert.incident_id == target_incident.id:
-            continue
-
-        old_incident = None
-        if main_alert.incident_id:
-            old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-
-        if old_incident and old_incident.definitively_resolved:
-            continue
-
-        main_alert.incident_id = target_incident.id
-        total_added += main_alert.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": main_alert.id,
-            "message": main_alert.message,
-            "counter": main_alert.counter,
-            "last_linked_time": main_alert.last_linked_time,
-        })
-        db.commit()
-        db.refresh(main_alert)
-
-        if old_incident and old_incident.id != target_incident.id:
-            transferred_from_incidents.add(old_incident.id)
-
-    for old_incident_id in transferred_from_incidents:
-        old_incident = db.query(Incident).filter(Incident.id == old_incident_id).first()
-        if not old_incident:
-            continue
-        for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
-            if not exists:
-                new_comment = IncidentComment(
-                    incident_id=target_incident.id,
-                    login_name=comment.login_name,
-                    comment_text=comment.comment_text
-                )
-                db.add(new_comment)
-        remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-        if remaining == 0 and not old_incident.definitively_resolved:
-            old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Bulk linking completed",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-@app.post("/incidents/{incident_id}/comments/")
-async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    new_comment = IncidentComment(
-        incident_id=incident_id,
-        login_name=comment.login_name,
-        comment_text=comment.comment_text
-    )
-    db.add(new_comment)
-    db.commit()
-    db.refresh(new_comment)
-    return new_comment
-
-@app.patch("/incidents/{incident_id}/comments/{comment_id}")
-async def update_incident_comment(incident_id: int, comment_id: int, payload: IncidentCommentUpdate, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    comment.comment_text = payload.comment_text
-    db.commit()
-    db.refresh(comment)
-    return comment
-
-@app.delete("/incidents/{incident_id}/comments/{comment_id}")
-async def delete_incident_comment(incident_id: int, comment_id: int, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    db.delete(comment)
-    db.commit()
-    return {"detail": "Comment deleted"}
-
-# New endpoint: Drag and Drop Transfer an Incident.
-@app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
-async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    for ma in source_incident.main_alerts:
-        ma.incident_id = target_incident.id
-        total_added += ma.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": ma.id,
-            "message": ma.message,
-            "counter": ma.counter,
-            "last_linked_time": ma.last_linked_time
-        })
-    for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
-        if not exists:
-            new_comment = IncidentComment(
-                incident_id=target_incident.id,
-                login_name=comment.login_name,
-                comment_text=comment.comment_text
-            )
-            db.add(new_comment)
-    source_incident.status = "discarded"
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Incident transferred via drag & drop",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
-@app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
-async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    total_removed = 0
-    moved_alerts = []
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if main_alert and main_alert.incident_id == target_incident.id:
-            main_alert.incident_id = source_incident.id
-            total_removed += main_alert.counter
-            moved_alerts.append({
-                "id": main_alert.id,
-                "message": main_alert.message,
-                "counter": main_alert.counter,
-                "last_linked_time": main_alert.last_linked_time,
-            })
-    target_incident.alert_count -= total_removed
-    source_incident.alert_count += total_removed
-    for comment in source_incident.comments:
-        for t_comment in list(target_incident.comments):
-            if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
-                db.delete(t_comment)
-    if source_incident.status in ("discarded", "resolved"):
-        source_incident.status = "open"
-    db.commit()
-    db.refresh(target_incident)
-    db.refresh(source_incident)
-    return {
-        "message": "Undo drag transfer completed",
-        "target_incident": {
-            "id": target_incident.id,
-            "alert_count": target_incident.alert_count
-        },
-        "source_incident": {
-            "id": source_incident.id,
-            "alert_count": source_incident.alert_count
-        },
-        "moved_alerts": moved_alerts
-    }
-
-@app.patch("/incidents/{incident_id}/resolve")
-async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/definitively_resolve")
-async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    incident.definitively_resolved = True
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/reopen")
-async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.definitively_resolved:
-        raise HTTPException(status_code=400, detail="Incident is definitively resolved and cannot be reopened.")
-    if incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
-    incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
-    incident.reopen_count += 1
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/rename")
-async def rename_incident(incident_id: int, payload: IncidentRename, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.incident_name = payload.new_name
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_severity")
-async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db: SessionLocal = Depends(get_db)):
-    allowed = {"MAJOR", "HIGH", "MEDIUM", "LOW"}
-    if payload.severity not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid severity value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Severity can only be updated on open incidents.")
-    incident.severity = payload.severity
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_team")
-async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: SessionLocal = Depends(get_db)):
-    allowed_teams = {"team1", "team2", "team3"}
-    if payload.team not in allowed_teams:
-        raise HTTPException(status_code=400, detail="Invalid team value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
-    incident.team = payload.team
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
-@app.patch("/incidents/{incident_id}/update_assignee")
-async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
-    allowed_assignees = {"person1", "person2", "person3", "person4"}
-    if payload.assignee not in allowed_assignees:
-        raise HTTPException(status_code=400, detail="Invalid assignee value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Assignee can only be updated on open incidents.")
-    incident.assignee = payload.assignee
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
-async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    if not target_incident:
-        raise HTTPException(status_code=404, detail="Target incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
-
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    transferred_from_incidents = set()
-
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if not main_alert:
-            continue
-        if main_alert.incident_id == target_incident.id:
-            continue
-
-        old_incident = None
-        if main_alert.incident_id:
-            old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-
-        if old_incident and old_incident.definitively_resolved:
-            continue
-
-        main_alert.incident_id = target_incident.id
-        total_added += main_alert.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": main_alert.id,
-            "message": main_alert.message,
-            "counter": main_alert.counter,
-            "last_linked_time": main_alert.last_linked_time,
-        })
-        db.commit()
-        db.refresh(main_alert)
-
-        if old_incident and old_incident.id != target_incident.id:
-            transferred_from_incidents.add(old_incident.id)
-
-    for old_incident_id in transferred_from_incidents:
-        old_incident = db.query(Incident).filter(Incident.id == old_incident_id).first()
-        if not old_incident:
-            continue
-        for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
-            if not exists:
-                new_comment = IncidentComment(
-                    incident_id=target_incident.id,
-                    login_name=comment.login_name,
-                    comment_text=comment.comment_text
-                )
-                db.add(new_comment)
-        remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-        if remaining == 0 and not old_incident.definitively_resolved:
-            old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Bulk linking completed",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-@app.post("/incidents/{incident_id}/comments/")
-async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    new_comment = IncidentComment(
-        incident_id=incident_id,
-        login_name=comment.login_name,
-        comment_text=comment.comment_text
-    )
-    db.add(new_comment)
-    db.commit()
-    db.refresh(new_comment)
-    return new_comment
-
-@app.patch("/incidents/{incident_id}/comments/{comment_id}")
-async def update_incident_comment(incident_id: int, comment_id: int, payload: IncidentCommentUpdate, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    comment.comment_text = payload.comment_text
-    db.commit()
-    db.refresh(comment)
-    return comment
-
-@app.delete("/incidents/{incident_id}/comments/{comment_id}")
-async def delete_incident_comment(incident_id: int, comment_id: int, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    db.delete(comment)
-    db.commit()
-    return {"detail": "Comment deleted"}
-
-# New endpoint: Drag and Drop Transfer an Incident.
-@app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
-async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    for ma in source_incident.main_alerts:
-        ma.incident_id = target_incident.id
-        total_added += ma.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": ma.id,
-            "message": ma.message,
-            "counter": ma.counter,
-            "last_linked_time": ma.last_linked_time
-        })
-    for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
-        if not exists:
-            new_comment = IncidentComment(
-                incident_id=target_incident.id,
-                login_name=comment.login_name,
-                comment_text=comment.comment_text
-            )
-            db.add(new_comment)
-    source_incident.status = "discarded"
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Incident transferred via drag & drop",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
-@app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
-async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    total_removed = 0
-    moved_alerts = []
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if main_alert and main_alert.incident_id == target_incident.id:
-            main_alert.incident_id = source_incident.id
-            total_removed += main_alert.counter
-            moved_alerts.append({
-                "id": main_alert.id,
-                "message": main_alert.message,
-                "counter": main_alert.counter,
-                "last_linked_time": main_alert.last_linked_time,
-            })
-    target_incident.alert_count -= total_removed
-    source_incident.alert_count += total_removed
-    for comment in source_incident.comments:
-        for t_comment in list(target_incident.comments):
-            if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
-                db.delete(t_comment)
-    # Force both incidents to be open so that undo is always possible.
-    source_incident.status = "open"
-    target_incident.status = "open"
-    db.commit()
-    db.refresh(target_incident)
-    db.refresh(source_incident)
-    return {
-        "message": "Undo drag transfer completed",
-        "target_incident": {
-            "id": target_incident.id,
-            "alert_count": target_incident.alert_count
-        },
-        "source_incident": {
-            "id": source_incident.id,
-            "alert_count": source_incident.alert_count
-        },
-        "moved_alerts": moved_alerts
-    }
-@app.patch("/incidents/{incident_id}/resolve")
-async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/definitively_resolve")
-async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    incident.definitively_resolved = True
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/reopen")
-async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.definitively_resolved:
-        raise HTTPException(status_code=400, detail="Incident is definitively resolved and cannot be reopened.")
-    if incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
-    incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
-    incident.reopen_count += 1
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/rename")
-async def rename_incident(incident_id: int, payload: IncidentRename, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.incident_name = payload.new_name
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_severity")
-async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db: SessionLocal = Depends(get_db)):
-    allowed = {"MAJOR", "HIGH", "MEDIUM", "LOW"}
-    if payload.severity not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid severity value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Severity can only be updated on open incidents.")
-    incident.severity = payload.severity
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_team")
-async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: SessionLocal = Depends(get_db)):
-    allowed_teams = {"team1", "team2", "team3"}
-    if payload.team not in allowed_teams:
-        raise HTTPException(status_code=400, detail="Invalid team value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
-    incident.team = payload.team
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
-@app.patch("/incidents/{incident_id}/update_assignee")
-async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
-    allowed_assignees = {"person1", "person2", "person3", "person4"}
-    if payload.assignee not in allowed_assignees:
-        raise HTTPException(status_code=400, detail="Invalid assignee value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Assignee can only be updated on open incidents.")
-    incident.assignee = payload.assignee
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.post("/incidents/{target_incident_id}/bulk_link_main_alerts")
-async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    if not target_incident:
-        raise HTTPException(status_code=404, detail="Target incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
-
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    transferred_from_incidents = set()
-
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if not main_alert:
-            continue
-        if main_alert.incident_id == target_incident.id:
-            continue
-
-        old_incident = None
-        if main_alert.incident_id:
-            old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
-
-        if old_incident and old_incident.definitively_resolved:
-            continue
-
-        main_alert.incident_id = target_incident.id
-        total_added += main_alert.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": main_alert.id,
-            "message": main_alert.message,
-            "counter": main_alert.counter,
-            "last_linked_time": main_alert.last_linked_time,
-        })
-        db.commit()
-        db.refresh(main_alert)
-
-        if old_incident and old_incident.id != target_incident.id:
-            transferred_from_incidents.add(old_incident.id)
-
-    for old_incident_id in transferred_from_incidents:
-        old_incident = db.query(Incident).filter(Incident.id == old_incident_id).first()
-        if not old_incident:
-            continue
-        for comment in old_incident.comments:
-            exists = any(
-                c.comment_text == comment.comment_text and c.login_name == comment.login_name
-                for c in target_incident.comments
-            )
-            if not exists:
-                new_comment = IncidentComment(
-                    incident_id=target_incident.id,
-                    login_name=comment.login_name,
-                    comment_text=comment.comment_text
-                )
-                db.add(new_comment)
-        remaining = db.query(MainAlert).filter(MainAlert.incident_id == old_incident.id).count()
-        if remaining == 0 and not old_incident.definitively_resolved:
-            old_incident.status = "discarded"
-        db.commit()
-        db.refresh(old_incident)
-
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Bulk linking completed",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-@app.post("/incidents/{incident_id}/comments/")
-async def add_incident_comment(incident_id: int, comment: IncidentCommentCreate, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    new_comment = IncidentComment(
-        incident_id=incident_id,
-        login_name=comment.login_name,
-        comment_text=comment.comment_text
-    )
-    db.add(new_comment)
-    db.commit()
-    db.refresh(new_comment)
-    return new_comment
-
-@app.patch("/incidents/{incident_id}/comments/{comment_id}")
-async def update_incident_comment(incident_id: int, comment_id: int, payload: IncidentCommentUpdate, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    comment.comment_text = payload.comment_text
-    db.commit()
-    db.refresh(comment)
-    return comment
-
-@app.delete("/incidents/{incident_id}/comments/{comment_id}")
-async def delete_incident_comment(incident_id: int, comment_id: int, db: SessionLocal = Depends(get_db)):
-    comment = db.query(IncidentComment).filter(
-        IncidentComment.id == comment_id,
-        IncidentComment.incident_id == incident_id
-    ).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    db.delete(comment)
-    db.commit()
-    return {"detail": "Comment deleted"}
-
-# New endpoint: Drag and Drop Transfer an Incident.
-@app.post("/incidents/{target_incident_id}/drag_transfer/{source_incident_id}")
-async def drag_transfer_incident(target_incident_id: int, source_incident_id: int, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if target_incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
-    total_added = 0
-    moved_alerts = []
-    for ma in source_incident.main_alerts:
-        ma.incident_id = target_incident.id
-        total_added += ma.counter
-        target_incident.last_alert_time = now
-        moved_alerts.append({
-            "id": ma.id,
-            "message": ma.message,
-            "counter": ma.counter,
-            "last_linked_time": ma.last_linked_time
-        })
-    for comment in source_incident.comments:
-        exists = any(
-            c.comment_text == comment.comment_text and c.login_name == comment.login_name
-            for c in target_incident.comments
-        )
-        if not exists:
-            new_comment = IncidentComment(
-                incident_id=target_incident.id,
-                login_name=comment.login_name,
-                comment_text=comment.comment_text
-            )
-            db.add(new_comment)
-    source_incident.status = "discarded"
-    target_incident.alert_count += total_added
-    db.commit()
-    db.refresh(target_incident)
-    return {
-        "message": "Incident transferred via drag & drop",
-        "incident": {
-            "id": target_incident.id,
-            "incident_name": target_incident.incident_name,
-            "alert_count": target_incident.alert_count,
-            "last_alert_time": target_incident.last_alert_time
-        },
-        "moved_main_alerts": moved_alerts
-    }
-
-# New endpoint: Undo Drag & Drop Transfer for an entire incident.
-@app.post("/incidents/{target_incident_id}/undo_drag_transfer/{source_incident_id}")
-async def undo_drag_transfer(target_incident_id: int, source_incident_id: int, payload: BulkLinkMainAlertsPayload, db: SessionLocal = Depends(get_db)):
-    target_incident = db.query(Incident).filter(Incident.id == target_incident_id).first()
-    source_incident = db.query(Incident).filter(Incident.id == source_incident_id).first()
-    if not target_incident or not source_incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    total_removed = 0
-    moved_alerts = []
-    for ma_id in payload.main_alert_ids:
-        main_alert = db.query(MainAlert).filter(MainAlert.id == ma_id).first()
-        if main_alert and main_alert.incident_id == target_incident.id:
-            main_alert.incident_id = source_incident.id
-            total_removed += main_alert.counter
-            moved_alerts.append({
-                "id": main_alert.id,
-                "message": main_alert.message,
-                "counter": main_alert.counter,
-                "last_linked_time": main_alert.last_linked_time,
-            })
-    target_incident.alert_count -= total_removed
-    source_incident.alert_count += total_removed
-    for comment in source_incident.comments:
-        for t_comment in list(target_incident.comments):
-            if t_comment.comment_text == comment.comment_text and t_comment.login_name == comment.login_name:
-                db.delete(t_comment)
-    if source_incident.status in ("discarded", "resolved"):
-        source_incident.status = "open"
-    db.commit()
-    db.refresh(target_incident)
-    db.refresh(source_incident)
-    return {
-        "message": "Undo drag transfer completed",
-        "target_incident": {
-            "id": target_incident.id,
-            "alert_count": target_incident.alert_count
-        },
-        "source_incident": {
-            "id": source_incident.id,
-            "alert_count": source_incident.alert_count
-        },
-        "moved_alerts": moved_alerts
-    }
-
-@app.patch("/incidents/{incident_id}/resolve")
-async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/definitively_resolve")
-async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
-    if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
-    incident.definitively_resolved = True
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/reopen")
-async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.definitively_resolved:
-        raise HTTPException(status_code=400, detail="Incident is definitively resolved and cannot be reopened.")
-    if incident.status == "discarded":
-        raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
-    incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
-    incident.reopen_count += 1
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/rename")
-async def rename_incident(incident_id: int, payload: IncidentRename, db: SessionLocal = Depends(get_db)):
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    incident.incident_name = payload.new_name
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_severity")
-async def update_severity(incident_id: int, payload: IncidentUpdateSeverity, db: SessionLocal = Depends(get_db)):
-    allowed = {"MAJOR", "HIGH", "MEDIUM", "LOW"}
-    if payload.severity not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid severity value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Severity can only be updated on open incidents.")
-    incident.severity = payload.severity
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-@app.patch("/incidents/{incident_id}/update_team")
-async def update_team(incident_id: int, payload: IncidentUpdateTeam, db: SessionLocal = Depends(get_db)):
-    allowed_teams = {"team1", "team2", "team3"}
-    if payload.team not in allowed_teams:
-        raise HTTPException(status_code=400, detail="Invalid team value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Team can only be updated on open incidents.")
-    incident.team = payload.team
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-class IncidentUpdateAssignee(BaseModel):
-    assignee: str
-
-@app.patch("/incidents/{incident_id}/update_assignee")
-async def update_assignee(incident_id: int, payload: IncidentUpdateAssignee, db: SessionLocal = Depends(get_db)):
-    allowed_assignees = {"person1", "person2", "person3", "person4"}
-    if payload.assignee not in allowed_assignees:
-        raise HTTPException(status_code=400, detail="Invalid assignee value")
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
-    if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
-    if incident.status != "open":
-        raise HTTPException(status_code=400, detail="Assignee can only be updated on open incidents.")
-    incident.assignee = payload.assignee
-    db.commit()
-    db.refresh(incident)
     return incident
 
 @app.get("/incidents/")
@@ -2679,10 +796,13 @@ async def read_incidents(
             "incident_name": inc.incident_name,
             "status": inc.status,
             "severity": inc.severity,
-            "wiki_url": inc.wiki_url,
+            "wikilink": inc.wikilink,
             "definitively_resolved": inc.definitively_resolved,
             "team": inc.team,
             "assignee": inc.assignee,
+            "source": inc.source,     # New field added
+            "host": inc.host,         # New field added
+            "state": inc.state,       # New field added
             "alert_count": inc.alert_count,
             "reopen_count": inc.reopen_count,
             "first_alert_time": inc.first_alert_time,
@@ -2707,5 +827,4 @@ async def check_permission(role: str):
 # -------------------------
 if __name__ == "__main__":
     import uvicorn
-    # IMPORTANT: Run "main:socket_app" so that Socket.IO endpoints are available.
     uvicorn.run("main:socket_app", host="0.0.0.0", port=8000, reload=True)

@@ -1,19 +1,65 @@
 <script>
   import { onMount, setContext } from 'svelte';
-  import { get } from 'svelte/store';
+  import { get, writable } from 'svelte/store';
   import NavBar from '$lib/NavBar.svelte';
-  import { filters } from '$lib/filters.js';
   import { fetchIncidents, loadPreferences, savePreferences } from '$lib/incidentHelpers.js';
-  import { writable } from 'svelte/store';
-
+  import { loadFilterPreferences, saveFilterPreferences } from '$lib/filters.js';
 
   let allIncidentsCollapsed = true;
   let allMainAlertsCollapsed = true;
   let allCommentsCollapsed = true;
 
-    // Subscribe to the filters store (we use get() to derive local variables)
-  let statusFilter, teamFilter, assigneeFilter, severityFilter, sortBy, sortOrder, firstAlertStart, firstAlertEnd, lastAlertStart, lastAlertEnd;
-  $: ({ statusFilter, teamFilter, assigneeFilter, severityFilter, sortBy, sortOrder, firstAlertStart, firstAlertEnd, lastAlertStart, lastAlertEnd } = get(filters));
+  // Create a writable store with the initial value from localStorage.
+  const filters = writable(loadFilterPreferences());
+
+  // Subscribe to changes in the filters store and persist them.
+  filters.subscribe(current => {
+    saveFilterPreferences(current);
+  });
+
+  // Provide the filters store to your child components (e.g., NavBar).
+  setContext("filters", filters);
+
+  // Other variables/functions for the app.
+  let userProfile = {
+    fullName: "John Doe",
+    role: "Admin",
+    appVersion: "1.0.0"
+  };
+
+  let darkMode = false;
+  let prefs = loadPreferences();
+
+  // Create a Svelte store for incidents.
+  const incidentsStore = writable([]);
+
+  // (Undo/redo functions and other helper functions remain as needed.)
+  let undoStack = [];
+  let redoStack = [];
+
+  onMount(() => {
+    prefs = loadPreferences();
+    darkMode = prefs.darkMode;
+    if (darkMode) {
+      document.body.classList.add("dark-mode");
+    }
+    allIncidentsCollapsed = prefs.allCollapsed;
+    allCommentsCollapsed = prefs.allCommentsCollapsed !== undefined ? prefs.allCommentsCollapsed : true;
+    allMainAlertsCollapsed = prefs.allMainAlertsCollapsed !== undefined ? prefs.allMainAlertsCollapsed : true;
+    window.addEventListener("keydown", (e) => {
+      console.log("Key pressed:", e.key);
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "z") {
+        e.preventDefault();
+        console.log("Keyboard shortcut: Undo detected");
+        undoAction();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+        e.preventDefault();
+        console.log("Keyboard shortcut: Redo detected");
+        redoAction();
+      }
+    });
+    fetchIncidentsWrapper();
+  });
 
   // Update the store when NavBar dispatches a change event.
   function handleStatusFilterChange(e) {
@@ -41,22 +87,6 @@
     console.log(`Layout: Date filter changed: ${filterKey} = ${value}`);
     filters.update(f => ({ ...f, [filterKey]: value }));
   }
-  // Other variables/functions for the app.
-  let userProfile = {
-    fullName: "John Doe",
-    role: "Admin",
-    appVersion: "1.0.0"
-  };
-
-  let darkMode = false;
-  let prefs = loadPreferences();
-
-  // Create a Svelte store for incidents.
-  const incidentsStore = writable([]);
-
-  // (Undo/redo functions and other helper functions remain as needed.)
-  let undoStack = [];
-  let redoStack = [];
 
   function recordAction(action) {
     if (action.incidentId !== undefined) {
@@ -80,11 +110,7 @@
       f.firstAlertStart,
       f.firstAlertEnd,
       f.lastAlertStart,
-      f.lastAlertEnd,             
-      // allIncidentsCollapsed,
-      // allMainAlertsCollapsed,
-      // allCommentsCollapsed,
-      // prefs
+      f.lastAlertEnd
     );
     // Apply client-side sorting
     incidentsStore.set([...data]);
@@ -144,7 +170,6 @@
           console.warn("Undo not implemented for action type:", action.type);
       }
       redoStack.push(action);
-      // Wait 500ms for backend to update, then refresh the store.
       await new Promise(resolve => setTimeout(resolve, 500));
       await fetchIncidentsWrapper();
     } catch (err) {
@@ -166,7 +191,7 @@
           const response = await fetch("http://localhost:8000/alerts/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ alert_name: action.alertName })
+            body: JSON.stringify({ message: action.alertName, state: 1, wikilink: "http://localhost:5000", host: "localhost", source: "pls"})
           });
           const data = await response.json();
           action.alertId = data.alert.id;
@@ -210,7 +235,6 @@
           console.warn("Redo not implemented for action type:", action.type);
       }
       undoStack.push(action);
-      // Wait 500ms for backend to update, then refresh the store.
       await new Promise(resolve => setTimeout(resolve, 500));
       await fetchIncidentsWrapper();
     } catch (err) {
@@ -221,7 +245,6 @@
 
   function toggleDropdown(inc, field) {
     inc["show" + field + "Dropdown"] = !inc["show" + field + "Dropdown"];
-    // Update the shared store so the UI reflects the change
     incidentsStore.update(items =>
       items.map(item =>
         item.id === inc.id ? { ...item, ["show" + field + "Dropdown"]: inc["show" + field + "Dropdown"] } : item
@@ -245,34 +268,12 @@
     window.location.href = '/logout';
   }
 
-  onMount(() => {
-    prefs = loadPreferences();
-    darkMode = prefs.darkMode;
-    if (darkMode) {
-      document.body.classList.add("dark-mode");
-    }
-    allIncidentsCollapsed = prefs.allCollapsed;
-    allCommentsCollapsed = prefs.allCommentsCollapsed !== undefined ? prefs.allCommentsCollapsed : true;
-    allMainAlertsCollapsed = prefs.allMainAlertsCollapsed !== undefined ? prefs.allMainAlertsCollapsed : true;
-    window.addEventListener("keydown", (e) => {
-      console.log("Key pressed:", e.key);
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "z") {
-        e.preventDefault();
-        console.log("Keyboard shortcut: Undo detected");
-        undoAction();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
-        e.preventDefault();
-        console.log("Keyboard shortcut: Redo detected");
-        redoAction();
-      }
-    });
-    fetchIncidentsWrapper();
-  });
-
-    // Provide contexts to child pages.
+  // Provide contexts to child pages.
   setContext("filters", filters);
   setContext("undoManager", { recordAction, undoAction, redoAction });
   setContext("incidentsStore", incidentsStore);
+
+  $: currentFilters = $filters;
 </script>
 
 <NavBar
@@ -282,12 +283,16 @@
   {redoAction}
   {toggleDarkMode}
   {logout}
-  {statusFilter}
-  {teamFilter}
-  {assigneeFilter}
-  {severityFilter}
-  {sortBy}
-  {sortOrder}
+  statusFilter={currentFilters.statusFilter}
+  teamFilter={currentFilters.teamFilter}
+  assigneeFilter={currentFilters.assigneeFilter}
+  severityFilter={currentFilters.severityFilter}
+  sortBy={currentFilters.sortBy}
+  sortOrder={currentFilters.sortOrder}
+  firstAlertStart={currentFilters.firstAlertStart}
+  firstAlertEnd={currentFilters.firstAlertEnd}
+  lastAlertStart={currentFilters.lastAlertStart}
+  lastAlertEnd={currentFilters.lastAlertEnd}
   on:statusFilterChange={handleStatusFilterChange}
   on:teamFilterChange={handleTeamFilterChange}
   on:assigneeFilterChange={handleAssigneeFilterChange}
@@ -296,6 +301,5 @@
   on:sortOrderChange={handleSortOrderChange}
   on:dateFilterChange={handleDateFilterChange}
 />
-
 
 <slot />

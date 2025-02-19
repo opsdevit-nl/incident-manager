@@ -30,6 +30,13 @@ RUN npm install quill
 
 RUN npm install socket.io-client
 
+# You can also install these packages via npm (e.g., run npm install jquery moment daterangepicker)
+# and then import them in your component. However, since daterangepicker expects jQuery to be globally
+# available, adding the script tags to your app.html is usually simpler.
+# This way, when your NavBar component initializes the daterangepicker in the onMount hook,
+# the required libraries are already loaded and available globally.
+# RUN npm install jquery moment daterangepicker
+
 # Run svelte-kit sync to generate type definitions and internal files
 # RUN npm run sync
 

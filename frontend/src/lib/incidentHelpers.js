@@ -4,11 +4,11 @@ export const PREF_KEY = "incidentPreferences";
 
 export function loadPreferences() {
   if (!browser) {
-    return { 
-      allCollapsed: true, 
-      collapsed: {}, 
-      allCommentsCollapsed: true, 
-      allMainAlertsCollapsed: true, 
+    return {
+      allCollapsed: true,
+      collapsed: {},
+      allCommentsCollapsed: true,
+      allMainAlertsCollapsed: true,
       mainAlertsCollapsed: {},
       darkMode: false
     };
@@ -23,11 +23,11 @@ export function loadPreferences() {
   } catch (err) {
     console.error("Error loading preferences:", err);
   }
-  return { 
-    allCollapsed: true, 
-    collapsed: {}, 
-    allCommentsCollapsed: true, 
-    allMainAlertsCollapsed: true, 
+  return {
+    allCollapsed: true,
+    collapsed: {},
+    allCommentsCollapsed: true,
+    allMainAlertsCollapsed: true,
     mainAlertsCollapsed: {},
     darkMode: false
   };
@@ -59,7 +59,7 @@ export async function fetchIncidents(
   if (assigneeFilter) url.searchParams.append("assignee", assigneeFilter);
   if (severityFilter) url.searchParams.append("severity", severityFilter);
   url.searchParams.append("t", Date.now());
-  
+
   const response = await fetch(url.toString());
   let incidents = await response.json();
   incidents.forEach(inc => {
