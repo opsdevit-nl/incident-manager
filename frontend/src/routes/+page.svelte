@@ -93,9 +93,6 @@
 
   window.addEventListener('click', handleClickOutside);
   
-  return () => {
-    window.removeEventListener('click', handleClickOutside);
-  };
 
     let socket;
     // Connect to your Socket.IO server (ensure the URL is correct)
@@ -109,6 +106,8 @@
 
     return () => {
       socket.disconnect();
+      window.removeEventListener('click', handleClickOutside);
+
     }
   });
 
