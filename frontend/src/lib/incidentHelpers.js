@@ -53,7 +53,7 @@ export async function fetchIncidents(
   prefs
 ) {
   // Append a timestamp parameter to avoid caching issues.
-  const url = new URL("http://localhost:8000/incidents");
+  const url = new URL("http://fedora.example.one.com:8000/incidents");
   url.searchParams.append("status", statusFilter);
   if (teamFilter) url.searchParams.append("team", teamFilter);
   if (assigneeFilter) url.searchParams.append("assignee", assigneeFilter);

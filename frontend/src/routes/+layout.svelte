@@ -128,43 +128,43 @@
       switch (action.type) {
         case "create":
           if (action.alertId && action.incidentId) {
-            await fetch(`http://localhost:8000/alerts/${action.alertId}`, { method: "DELETE" });
-            await fetch(`http://localhost:8000/incidents/${action.incidentId}`, { method: "DELETE" });
+            await fetch(`http://fedora.example.one.com:8000/alerts/${action.alertId}`, { method: "DELETE" });
+            await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}`, { method: "DELETE" });
           }
           break;
         case "rename":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/rename`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/rename`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ new_name: action.oldName })
           });
           break;
         case "updateSeverity":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/update_severity`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/update_severity`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ severity: action.oldSeverity })
           });
           break;
         case "updateTeam":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/update_team`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/update_team`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ team: action.oldTeam })
           });
           break;
         case "updateAssignee":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/update_assignee`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/update_assignee`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ assignee: action.oldAssignee })
           });
           break;
         case "resolve":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/reopen`, { method: "PATCH" });
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/reopen`, { method: "PATCH" });
           break;
         case "reopen":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/resolve`, { method: "PATCH" });
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/resolve`, { method: "PATCH" });
           break;
         default:
           console.warn("Undo not implemented for action type:", action.type);
@@ -188,48 +188,48 @@
     try {
       switch (action.type) {
         case "create":
-          const response = await fetch("http://localhost:8000/alerts/", {
+          const response = await fetch("http://fedora.example.one.com:8000/alerts/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: action.alertName, state: 1, wikilink: "http://localhost:5000", host: "localhost", source: "pls"})
+            body: JSON.stringify({ message: action.alertName, state: 1, wikilink: "http://fedora.example.one.com:5000", host: "fedora.example.one.com", source: "pls"})
           });
           const data = await response.json();
           action.alertId = data.alert.id;
           action.incidentId = data.incident?.id || data.incident?.incident_id;
           break;
         case "rename":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/rename`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/rename`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ new_name: action.newName })
           });
           break;
         case "updateSeverity":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/update_severity`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/update_severity`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ severity: action.newSeverity })
           });
           break;
         case "updateTeam":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/update_team`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/update_team`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ team: action.newTeam })
           });
           break;
         case "updateAssignee":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/update_assignee`, {
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/update_assignee`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ assignee: action.newAssignee })
           });
           break;
         case "resolve":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/resolve`, { method: "PATCH" });
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/resolve`, { method: "PATCH" });
           break;
         case "reopen":
-          await fetch(`http://localhost:8000/incidents/${action.incidentId}/reopen`, { method: "PATCH" });
+          await fetch(`http://fedora.example.one.com:8000/incidents/${action.incidentId}/reopen`, { method: "PATCH" });
           break;
         default:
           console.warn("Redo not implemented for action type:", action.type);

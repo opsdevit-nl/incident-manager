@@ -1,12 +1,13 @@
 import socketio
-from datetime import datetime
-from fastapi import FastAPI, HTTPException, Depends, Query
+from datetime import datetime, timezone
+from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, joinedload
 from casbin import Enforcer
 from pydantic import BaseModel, conlist
+from typing import List, Optional, Any, Union
 
 # -------------------------
 # Database setup and models
@@ -25,7 +26,7 @@ class Alert(Base):
     state = Column(Integer)
     wikilink = Column(String)
     status = Column(String, default="new")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # Link to a MainAlert
     main_alert_id = Column(Integer, ForeignKey('main_alerts.id'), nullable=True)
     main_alert = relationship("MainAlert", back_populates="alerts")
@@ -39,7 +40,7 @@ class MainAlert(Base):
     state = Column(Integer)
     wikilink = Column(String)
     counter = Column(Integer, default=0)
-    last_linked_time = Column(DateTime, default=datetime.utcnow)
+    last_linked_time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # Each main alert belongs to an Incident
     incident_id = Column(Integer, ForeignKey('incidents.id'), nullable=True)
     alerts = relationship("Alert", back_populates="main_alert")
@@ -51,8 +52,8 @@ class IncidentComment(Base):
     incident_id = Column(Integer, ForeignKey('incidents.id'))
     login_name = Column(String)
     comment_text = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_modified = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_modified = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     incident = relationship("Incident", back_populates="comments")
 
 class Incident(Base):
@@ -67,11 +68,11 @@ class Incident(Base):
     source = Column(String, nullable=True)
     host = Column(String, nullable=True)
     state = Column(Integer, nullable=True)
-    first_alert_time = Column(DateTime, default=datetime.utcnow)
-    last_alert_time = Column(DateTime, nullable=True)
-    last_resolved_time = Column(DateTime, nullable=True)
-    first_resolved_time = Column(DateTime, nullable=True)
-    reopened_time = Column(DateTime, nullable=True)
+    first_alert_time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_alert_time = Column(DateTime(timezone=True), nullable=True)
+    last_resolved_time = Column(DateTime(timezone=True), nullable=True)
+    first_resolved_time = Column(DateTime(timezone=True), nullable=True)
+    reopened_time = Column(DateTime(timezone=True), nullable=True)
     alert_count = Column(Integer, default=0)
     reopen_count = Column(Integer, default=0)
     merged = Column(Boolean, default=False)
@@ -84,12 +85,13 @@ class Incident(Base):
 # -------------------------
 casbin_enforcer = Enforcer("/app/rbac_model.conf", "/app/rbac_policy.csv")
 app = FastAPI()
-origins = ["http://localhost:5000"]
+origins = ["http://10.23.39.8:5000","http://localhost:5000","http://fedora.example.one.com:5000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
+    # allow_origins=origins,
     allow_headers=["*"],
 )
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=origins)
@@ -130,6 +132,15 @@ class BulkLinkMainAlertsPayload(BaseModel):
 class IncidentUpdateAssignee(BaseModel):
     assignee: str
 
+class AlertInput(BaseModel):
+    status: str
+    labels: dict
+    annotations: Optional[dict] = {}
+
+class BulkAlerts(BaseModel):
+    alerts: List[AlertInput]
+    externalURL: Optional[str] = None
+
 def get_db():
     db = SessionLocal()
     try:
@@ -160,76 +171,80 @@ def on_startup():
 # -------------------------
 # Endpoints
 # -------------------------
-@app.post("/alerts/")
-async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
-    now = datetime.utcnow()
-    db_alert = Alert(
-        message=alert.message,
-        source=alert.source,
-        host=alert.host,
-        state=alert.state,
-        wikilink=alert.wikilink
-    )
-    db.add(db_alert)
-    db.commit()
-    db.refresh(db_alert)
-
+# -------------------------
+# Helper: Create/Update Main Alert and Incident
+# Now updates extra fields (host, state, source).
+# New requirement: if an incident has multiple main_alerts, mark it as resolved only if ALL have state 3.
+# -------------------------
+async def process_main_alert(db: SessionLocal, db_alert: Alert, grouping_key: str, host: str, state: int, source: str) -> dict:
+    now = datetime.now(timezone.utc)
     existing_main_alert = (
         db.query(MainAlert)
         .join(Incident, isouter=True)
         .filter(
-            MainAlert.message == alert.message,
-            MainAlert.source == alert.source,
-            MainAlert.host == alert.host,
-            MainAlert.wikilink == alert.wikilink,
-            MainAlert.state == alert.state,
+            MainAlert.message == grouping_key,
             ((Incident.id.is_(None)) | (Incident.definitively_resolved == False))
         )
         .first()
     )
-
+    def update_incident_status(incident: Incident):
+        # Check if all main alerts of the incident have state 3.
+        main_alerts = db.query(MainAlert).filter(MainAlert.incident_id == incident.id).all()
+        if main_alerts and all(ma.state == 3 for ma in main_alerts):
+            incident.status = "resolved"
+        else:
+            incident.status = "open"
+        db.commit()
+        db.refresh(incident)
     if existing_main_alert:
         existing_main_alert.counter += 1
         existing_main_alert.last_linked_time = now
+        existing_main_alert.host = host
+        existing_main_alert.state = state
+        existing_main_alert.source = source
         db_alert.main_alert_id = existing_main_alert.id
         db.commit()
         db.refresh(existing_main_alert)
         db.refresh(db_alert)
-
         if existing_main_alert.incident_id:
             incident = db.query(Incident).filter(Incident.id == existing_main_alert.incident_id).first()
             if incident:
-                if incident.status == "resolved" and not incident.definitively_resolved:
-                    incident.status = "open"
-                    incident.reopened_time = now
-                    incident.reopen_count += 1
+                # Instead of directly setting status based solely on the new alert's state,
+                # update the incident's fields and then check all main_alerts.
                 incident.alert_count += 1
                 incident.last_alert_time = now
+                incident.host = host
+                incident.state = state
+                incident.source = source
                 db.commit()
-                db.refresh(incident)
+                update_incident_status(incident)
                 await sio.emit("incident_update", {"type": "create", "incident_id": incident.id})
-                return {
+                result = {
                     "alert": db_alert,
                     "main_alert": {
                         "id": existing_main_alert.id,
                         "message": existing_main_alert.message,
                         "counter": existing_main_alert.counter,
                         "last_linked_time": existing_main_alert.last_linked_time,
+                        "host": existing_main_alert.host,
+                        "state": existing_main_alert.state,
+                        "source": existing_main_alert.source,
                     },
                     "incident": incident,
                 }
+                return result
             else:
                 new_incident = Incident(
-                    incident_name=alert.message,
-                    status="open",
+                    incident_name=grouping_key,
+                    status="resolved" if state == 3 else "open",
                     alert_count=1,
                     severity="MEDIUM",
-                    wikilink=alert.wikilink,
-                    source=alert.source,
-                    host=alert.host,
-                    state=alert.state,
+                    wikilink="",
                     first_alert_time=now,
                     last_alert_time=now,
+                    host=host,
+                    state=state,
+                    source=source,
                 )
                 db.add(new_incident)
                 db.commit()
@@ -238,28 +253,32 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
                 db.commit()
                 db.refresh(existing_main_alert)
                 await sio.emit("incident_update", {"type": "create", "incident_id": new_incident.id})
-                return {
+                result = {
                     "alert": db_alert,
                     "main_alert": {
                         "id": existing_main_alert.id,
                         "message": existing_main_alert.message,
                         "counter": existing_main_alert.counter,
                         "last_linked_time": existing_main_alert.last_linked_time,
+                        "host": existing_main_alert.host,
+                        "state": existing_main_alert.state,
+                        "source": existing_main_alert.source,
                     },
                     "incident": new_incident,
                 }
+                return result
         else:
             new_incident = Incident(
-                incident_name=alert.message,
-                status="open",
+                incident_name=grouping_key,
+                status="resolved" if state == 3 else "open",
                 alert_count=1,
                 severity="MEDIUM",
-                wikilink=alert.wikilink,
-                source=alert.source,
-                host=alert.host,
-                state=alert.state,
+                wikilink="",
                 first_alert_time=now,
                 last_alert_time=now,
+                host=host,
+                state=state,
+                source=source,
             )
             db.add(new_incident)
             db.commit()
@@ -268,25 +287,28 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
             db.commit()
             db.refresh(existing_main_alert)
             await sio.emit("incident_update", {"type": "create", "incident_id": new_incident.id})
-            return {
+            result = {
                 "alert": db_alert,
                 "main_alert": {
                     "id": existing_main_alert.id,
                     "message": existing_main_alert.message,
                     "counter": existing_main_alert.counter,
                     "last_linked_time": existing_main_alert.last_linked_time,
+                    "host": existing_main_alert.host,
+                    "state": existing_main_alert.state,
+                    "source": existing_main_alert.source,
                 },
                 "incident": new_incident,
             }
+            return result
     else:
         new_main_alert = MainAlert(
-            message=alert.message,
-            source=alert.source,
-            host=alert.host,
-            state=alert.state,
-            wikilink=alert.wikilink,
+            message=grouping_key,
             counter=1,
             last_linked_time=now,
+            host=host,
+            state=state,
+            source=source,
         )
         db.add(new_main_alert)
         db.commit()
@@ -297,16 +319,16 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
         db.refresh(db_alert)
 
         new_incident = Incident(
-            incident_name=alert.message,
-            status="open",
+            incident_name=grouping_key,
+            status="resolved" if state == 3 else "open",
             alert_count=1,
             severity="MEDIUM",
-            wikilink=alert.wikilink,
-            source=alert.source,
-            host=alert.host,
-            state=alert.state,
+            wikilink="",
             first_alert_time=now,
             last_alert_time=now,
+            host=host,
+            state=state,
+            source=source,
         )
         db.add(new_incident)
         db.commit()
@@ -316,16 +338,119 @@ async def create_alert(alert: AlertCreate, db: SessionLocal = Depends(get_db)):
         db.commit()
         db.refresh(new_main_alert)
         await sio.emit("incident_update", {"type": "create", "incident_id": new_incident.id})
-        return {
+        result = {
             "alert": db_alert,
             "main_alert": {
                 "id": new_main_alert.id,
                 "message": new_main_alert.message,
                 "counter": new_main_alert.counter,
                 "last_linked_time": new_main_alert.last_linked_time,
+                "host": new_main_alert.host,
+                "state": new_main_alert.state,
+                "source": new_main_alert.source,
             },
             "incident": new_incident,
         }
+        return result
+
+# -------------------------
+# Combined /alerts/ endpoint
+# -------------------------
+@app.post("/alerts/")
+async def create_alerts(request: Request, db: SessionLocal = Depends(get_db)):
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    results = []
+
+    # NEW FORMAT: payload contains "alerts" key.
+    if isinstance(data, dict) and "alerts" in data:
+        try:
+            bulk = BulkAlerts(**data)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        for alert_item in bulk.alerts:
+            status_value = alert_item.status
+            labels = alert_item.labels
+            annotations = alert_item.annotations or {}
+
+            message = str(labels)
+            if annotations.get("description", "") and len(annotations["description"]) > 1:
+                message = annotations["description"]
+            elif annotations.get("message", "") and len(annotations["message"]) > 1:
+                message = annotations["message"]
+
+            grouping_key = labels.get("alertname") or message
+            metricsource = labels.get("metricsource", "")
+            if grouping_key == "Watchdog" and metricsource:
+                continue
+
+            if metricsource and metricsource.startswith("ocp-"):
+                host_name = metricsource
+            else:
+                host_candidate = labels.get("cluster") or labels.get("instance") or bulk.externalURL or "Null"
+                if "http" not in host_candidate and "https" not in host_candidate:
+                    host_name = host_candidate.split(":")[0]
+                else:
+                    host_name = host_candidate
+
+            wikilink = labels.get("wikilink", "Undefined")
+            destination = labels.get("destination", "pls")
+
+            state = 1
+            if status_value == "resolved":
+                if destination == "pls":
+                    now_temp = datetime.now()
+                    message = f"{message} - Automatically closed @ {now_temp.strftime('%Y-%m-%d %H:%M:%S')}"
+                    state = 3
+                # Otherwise, leave the message unchanged.
+
+            db_alert = Alert(
+                message=message,
+                source=destination,
+                host=host_name,
+                state=state,
+                wikilink=wikilink,
+                status=status_value
+            )
+            db.add(db_alert)
+            db.commit()
+            db.refresh(db_alert)
+
+            result = await process_main_alert(db, db_alert, grouping_key, host=host_name, state=state, source=destination)
+            results.append(result)
+
+    else:
+        # LEGACY FORMAT: payload already contains keys.
+        # Also, cast state to int.
+        legacy_alerts: List[dict] = data if isinstance(data, list) else [data]
+        for legacy in legacy_alerts:
+            if "message" not in legacy:
+                raise HTTPException(status_code=422, detail="Missing required field 'message' in legacy payload")
+            grouping_key = legacy.get("message")
+            host_val = legacy.get("host", "")
+            try:
+                state_val = int(legacy.get("state", 1))
+            except ValueError:
+                state_val = 1
+            source_val = legacy.get("source", "")
+            db_alert = Alert(
+                message=legacy.get("message"),
+                source=source_val,
+                host=host_val,
+                state=state_val,
+                wikilink=legacy.get("wikilink", "Undefined"),
+                status=legacy.get("status", "new")
+            )
+            db.add(db_alert)
+            db.commit()
+            db.refresh(db_alert)
+            result = await process_main_alert(db, db_alert, grouping_key, host=host_val, state=state_val, source=source_val)
+            results.append(result)
+
+    return {"alerts_processed": results}
 
 @app.post("/incidents/{incident_id}/link_main_alert")
 async def link_main_alert(incident_id: int, payload: LinkMainAlertPayload, db: SessionLocal = Depends(get_db)):
@@ -342,7 +467,7 @@ async def link_main_alert(incident_id: int, payload: LinkMainAlertPayload, db: S
     if main_alert.incident_id == target_incident.id:
         return {"message": "Main alert already linked to this incident", "incident": target_incident}
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     old_incident = None
     if main_alert.incident_id:
         old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
@@ -388,7 +513,7 @@ async def drag_link_main_alert(target_incident_id: int, main_alert_id: int, db: 
     if main_alert.incident_id == target_incident.id:
         return {"message": "Main alert already linked to this incident", "incident": target_incident}
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     old_incident = None
     if main_alert.incident_id:
         old_incident = db.query(Incident).filter(Incident.id == main_alert.incident_id).first()
@@ -448,7 +573,7 @@ async def bulk_link_main_alerts(target_incident_id: int, payload: BulkLinkMainAl
     if target_incident.status == "discarded":
         raise HTTPException(status_code=400, detail="Cannot link main alerts to a discarded incident.")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     total_added = 0
     moved_alerts = []
     transferred_from_incidents = set()
@@ -567,7 +692,7 @@ async def drag_transfer_incident(target_incident_id: int, source_incident_id: in
         raise HTTPException(status_code=404, detail="Incident not found")
     if target_incident.status == "discarded":
         raise HTTPException(status_code=400, detail="Cannot transfer into a discarded incident")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     total_added = 0
     moved_alerts = []
     for ma in source_incident.main_alerts:
@@ -655,9 +780,9 @@ async def resolve_incident(incident_id: int, db: SessionLocal = Depends(get_db))
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
+    incident.last_resolved_time = datetime.now(timezone.utc)
     if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
+        incident.first_resolved_time = datetime.now(timezone.utc)
     db.commit()
     db.refresh(incident)
     await sio.emit("incident_update", {"type": "definitively_resolve", "incident_id": incident.id})
@@ -669,9 +794,9 @@ async def definitively_resolve_incident(incident_id: int, db: SessionLocal = Dep
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     incident.status = "resolved"
-    incident.last_resolved_time = datetime.utcnow()
+    incident.last_resolved_time = datetime.now(timezone.utc)
     if not incident.first_resolved_time:
-        incident.first_resolved_time = datetime.utcnow()
+        incident.first_resolved_time = datetime.now(timezone.utc)
     incident.definitively_resolved = True
     db.commit()
     db.refresh(incident)
@@ -688,7 +813,7 @@ async def reopen_incident(incident_id: int, db: SessionLocal = Depends(get_db)):
     if incident.status == "discarded":
         raise HTTPException(status_code=400, detail="Cannot reopen a discarded incident.")
     incident.status = "open"
-    incident.reopened_time = datetime.utcnow()
+    incident.reopened_time = datetime.now(timezone.utc)
     incident.reopen_count += 1
     db.commit()
     db.refresh(incident)
@@ -782,6 +907,9 @@ async def read_incidents(
             "id": ma.id,
             "message": ma.message,
             "counter": ma.counter,
+            "source": ma.source,     # New field added
+            "host": ma.host,         # New field added
+            "state": ma.state,       # New field added
             "last_linked_time": ma.last_linked_time
         } for ma in inc.main_alerts]
         comments_info = [{

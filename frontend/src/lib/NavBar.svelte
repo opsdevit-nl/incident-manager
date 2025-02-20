@@ -8,7 +8,7 @@
   // Reference for the date range picker button.
   let dateRangeButton;
 
-  export let userProfile = { fullName: "John Doe", role: "Admin", appVersion: "1.0.0" };
+  export const userProfile = { fullName: "John Doe", role: "Admin", appVersion: "1.0.0" };
   export let darkMode = false;
   export let undoAction = () => {};
   export let redoAction = () => {};
@@ -158,7 +158,7 @@
                 class="btn btn-secondary mr-2" aria-label="Dark Mode Toggle">
           {#if darkMode}
             <i class="bi bi-sun-fill"></i>
-          {:else}
+          {:else} 
             <i class="bi bi-sun"></i>
           {/if}
         </button>
@@ -169,8 +169,8 @@
 
   <!-- Overlay Modal for Filters & Sorting -->
   {#if showFiltersModal}
-    <div class="filter-modal-overlay" on:click={() => showFiltersModal = false}>
-      <div class="filter-modal-content" class:dark={darkMode} on:click|stopPropagation>
+    <div class="filter-modal-overlay" aria-label="menu"  role="button" tabindex="0" on:click={() => showFiltersModal = false} on:keydown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick(); } }}>
+      <div class="filter-modal-content" class:dark={darkMode} aria-label="menu" role="button" tabindex="0"  on:click|stopPropagation on:keydown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick(); } }}>
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0">Filters &amp; Sorting</h5>
           <button class="btn btn-link" on:click={() => showFiltersModal = false}>Close</button>

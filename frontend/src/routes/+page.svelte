@@ -29,6 +29,7 @@
   // --------------------------------------------
   // We define defaults for each column's visibility:
   let defaultColumnVisibility = {
+  select: true,
   id: true,
   first_alert: true,
   last_alert: true,
@@ -92,11 +93,11 @@
   };
 
   window.addEventListener('click', handleClickOutside);
-  
+
 
     let socket;
     // Connect to your Socket.IO server (ensure the URL is correct)
-    socket = io("http://localhost:8000/", { path: "/socket.io" });
+    socket = io("http://fedora.example.one.com:8000/", { path: "/socket.io" });
 
     // Listen for "incident_update" events and refresh incidents on receipt
     socket.on("incident_update", (data) => {
@@ -298,14 +299,25 @@ $: {
   }
 
   function shortTimestamp(ts) {
-    if (!ts) return "";
-    const date = new Date(ts);
-    // Format as MM/DD HH:MM
-    const mm = ("0" + (date.getMonth() + 1)).slice(-2);
-    const dd = ("0" + date.getDate()).slice(-2);
-    const hh = ("0" + date.getHours()).slice(-2);
-    const min = ("0" + date.getMinutes()).slice(-2);
-  return `${mm}/${dd} ${hh}:${min}`;
+  if (!ts) return "";
+  const date = new Date(ts);
+  // Force local formatting with a format like "MM/DD/YYYY, HH:MM"
+  const options = {
+    month: '2-digit',
+    day: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  };
+  // For example: "10/02/2020, 08:00"
+  const localeString = date.toLocaleString('en-US', options);
+  const parts = localeString.split(', ');
+  if (parts.length < 2) return localeString;
+  // parts[0] is "MM/DD/YYYY", we want just MM/DD
+  const [month, day, year] = parts[0].split('/');
+  const time = parts[1]; // "HH:MM"
+  return `${month}-${day}-${year} ${time}`;
 }
 
   // Global toggles that re-fetch data.
@@ -421,7 +433,7 @@ $: {
     if (event.dataTransfer.types.includes("application/main-alert")) return;
     const sourceIncidentId = event.dataTransfer.getData("application/incident");
     if (sourceIncidentId && sourceIncidentId !== targetIncidentId.toString()) {
-      fetch(`http://localhost:8000/incidents/${targetIncidentId}/drag_transfer/${sourceIncidentId}`, {
+      fetch(`http://fedora.example.one.com:8000/incidents/${targetIncidentId}/drag_transfer/${sourceIncidentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" }
       }).then(() => fetchIncidentsWrapper());
@@ -439,7 +451,7 @@ $: {
   if (data) {
     const { mainAlertId, fromIncidentId } = JSON.parse(data);
     if (fromIncidentId !== targetIncidentId) {
-      const response = await fetch(`http://localhost:8000/incidents/${targetIncidentId}/drag_link_main_alert/${mainAlertId}`, {
+      const response = await fetch(`http://fedora.example.one.com:8000/incidents/${targetIncidentId}/drag_link_main_alert/${mainAlertId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" }
       });
@@ -459,7 +471,7 @@ $: {
   }
 
   async function addIncidentComment(incidentId, loginName, commentText) {
-    await fetch(`http://localhost:8000/incidents/${incidentId}/comments`, {
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/comments`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ login_name: loginName, comment_text: commentText })
@@ -467,7 +479,7 @@ $: {
     fetchIncidentsWrapper();
   }
   async function updateIncidentComment(incidentId, commentId, commentText) {
-    await fetch(`http://localhost:8000/incidents/${incidentId}/comments/${commentId}`, {
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/comments/${commentId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ comment_text: commentText })
@@ -496,7 +508,7 @@ $: {
     fetchIncidentsWrapper();
   }
   async function deleteIncidentComment(incidentId, commentId) {
-    await fetch(`http://localhost:8000/incidents/${incidentId}/comments/${commentId}`, {
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/comments/${commentId}`, {
       method: "DELETE"
     });
     fetchIncidentsWrapper();
@@ -504,10 +516,10 @@ $: {
 
   async function createAlert() {
     if (!newAlertName) return;
-    const response = await fetch("http://localhost:8000/alerts/", {
+    const response = await fetch("http://fedora.example.one.com:8000/alerts/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: newAlertName, state: 1, wikilink: "http://localhost:5000", host: "localhost", source: "pls"})
+      body: JSON.stringify({ message: newAlertName, state: 1, wikilink: "http://fedora.example.one.com:5000", host: "fedora.example.one.com", source: "pls"})
     });
     const data = await response.json();
     const incidentId = data.incident?.id || data.incident?.incident_id;
@@ -525,7 +537,7 @@ $: {
     incidentsStore.subscribe(value => $incidents = value)();
     const selectedIncidents = $incidents.filter(inc => inc.selectedForBulk && inc.status !== "open");
     for (const inc of selectedIncidents) {
-      await fetch(`http://localhost:8000/incidents/${inc.id}/reopen`, { method: "PATCH" });
+      await fetch(`http://fedora.example.one.com:8000/incidents/${inc.id}/reopen`, { method: "PATCH" });
     }
     fetchIncidentsWrapper();
   }
@@ -534,7 +546,7 @@ $: {
     incidentsStore.subscribe(value => $incidents = value)();
     const selectedIncidents = $incidents.filter(inc => inc.selectedForBulk && inc.status === "open");
     for (const inc of selectedIncidents) {
-      await fetch(`http://localhost:8000/incidents/${inc.id}/resolve`, { method: "PATCH" });
+      await fetch(`http://fedora.example.one.com:8000/incidents/${inc.id}/resolve`, { method: "PATCH" });
     }
     fetchIncidentsWrapper();
   }
@@ -560,7 +572,7 @@ $: {
       console.warn("No main alerts selected for bulk linking.");
       return;
     }
-    const response = await fetch(`http://localhost:8000/incidents/${targetIncidentId}/bulk_link_main_alerts`, {
+    const response = await fetch(`http://fedora.example.one.com:8000/incidents/${targetIncidentId}/bulk_link_main_alerts`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ main_alert_ids: selectedMainAlertIds })
@@ -571,16 +583,16 @@ $: {
     fetchIncidentsWrapper();
   }
   async function resolveIncident(incidentId) {
-    await fetch(`http://localhost:8000/incidents/${incidentId}/resolve`, { method: "PATCH" });
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/resolve`, { method: "PATCH" });
     recordAction({ type: "resolve", incidentId });
     fetchIncidentsWrapper();
   }
   async function definitivelyResolveIncident(incidentId) {
-    await fetch(`http://localhost:8000/incidents/${incidentId}/definitively_resolve`, { method: "PATCH" });
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/definitively_resolve`, { method: "PATCH" });
     fetchIncidentsWrapper();
   }
   async function reopenIncident(incidentId) {
-    await fetch(`http://localhost:8000/incidents/${incidentId}/reopen`, { method: "PATCH" });
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/reopen`, { method: "PATCH" });
     recordAction({ type: "reopen", incidentId });
     fetchIncidentsWrapper();
   }
@@ -592,7 +604,7 @@ $: {
     }));
     if (!inc) return;
     const oldName = inc.incident_name;
-    await fetch(`http://localhost:8000/incidents/${incidentId}/rename`, {
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/rename`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ new_name: newName })
@@ -618,7 +630,7 @@ $: {
     inc.severity = newSeverity;
     try {
       console.log("Updating severity for incident", incidentId, "from", oldSeverity, "to", newSeverity);
-      await fetch(`http://localhost:8000/incidents/${incidentId}/update_severity`, {
+      await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/update_severity`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ severity: newSeverity })
@@ -640,7 +652,7 @@ $: {
     inc.team = newTeam;
     try {
       console.log("Updating team for incident", incidentId, "from", oldTeam, "to", newTeam);
-      await fetch(`http://localhost:8000/incidents/${incidentId}/update_team`, {
+      await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/update_team`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ team: newTeam })
@@ -662,7 +674,7 @@ $: {
     inc.assignee = newAssignee;
     try {
       console.log("Updating assignee for incident", incidentId, "from", oldAssignee, "to", newAssignee);
-      await fetch(`http://localhost:8000/incidents/${incidentId}/update_assignee`, {
+      await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/update_assignee`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ assignee: newAssignee })
@@ -681,10 +693,10 @@ $: {
     if (!inc) return;
     if (newStatus === inc.status) return;
     if (newStatus === "resolved" && inc.status === "open") {
-      await fetch(`http://localhost:8000/incidents/${incidentId}/resolve`, { method: "PATCH" });
+      await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/resolve`, { method: "PATCH" });
       recordAction({ type: "resolve", incidentId });
     } else if (newStatus === "open" && inc.status === "resolved") {
-      await fetch(`http://localhost:8000/incidents/${incidentId}/reopen`, { method: "PATCH" });
+      await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/reopen`, { method: "PATCH" });
       recordAction({ type: "reopen", incidentId });
     }
     fetchIncidentsWrapper();
@@ -692,7 +704,7 @@ $: {
 
   async function linkMainAlert(incidentId, mainAlertId) {
     if (!mainAlertId) return;
-    await fetch(`http://localhost:8000/incidents/${incidentId}/link/${mainAlertId}`, {
+    await fetch(`http://fedora.example.one.com:8000/incidents/${incidentId}/link/${mainAlertId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" }
     });
@@ -734,7 +746,7 @@ $: {
 
 .ma-fields span {
   margin-right: 1rem;    /* Optional: extra horizontal spacing */
-}    
+}
     .main-alert-box {
       background-color: #e9f7fe;
       border: 1px solid #007bff;
@@ -827,6 +839,11 @@ $: {
       padding: 0 .1rem;
       white-space: nowrap;
     }
+    .compact-field.select {
+      width: 2em;
+      flex-shrink: 0;
+      color: gray;
+    }
     .compact-field.id {
       width: 3em;
       flex-shrink: 0;
@@ -842,15 +859,15 @@ $: {
       flex-shrink: 0;
     }
     .compact-field.first_alert {
-    width: 90px;
+    width: 7em;
     margin-right: 0.4rem;
     flex-shrink: 0;
     }
     .compact-field.last_alert {
-      width: 90px;
+      width: 7em;
       margin-right: 0.4rem;
       flex-shrink: 0;
-}    
+}
     .compact-field.severity {
       width: 100px;
       flex-shrink: 0;
@@ -869,8 +886,8 @@ $: {
       flex-shrink: 0;
     }
     .compact-field.host {
-      width: 7em;
-      flex-shrink: 0;
+      width: 20em;
+      flex-shrink: 1;
     }
     .compact-field.state {
       width: 80px;
@@ -960,7 +977,7 @@ $: {
   {/if}
   </div>
 
-  
+
 
   <!-- Bulk Link Section -->
   <div class="mb-4">
@@ -987,6 +1004,9 @@ $: {
     <!-- Header row for compact view -->
     <div class="row">
       <article class="col-12 incident-box compact-incident header-row">
+        {#if columnVisibility.select}
+        <div class="compact-field select">[ ] </div>
+        {/if}
         {#if columnVisibility.id}
         <div class="compact-field id">ID</div>
         {/if}
@@ -1049,6 +1069,11 @@ $: {
       }
     }}
     on:dragover={allowDrop}>
+    {#if columnVisibility.select}
+  <div class="compact-field select">
+    <input type="checkbox" bind:checked={inc.selectedForBulk} aria-label="Select incident" />
+  </div>
+{/if}
     {#if columnVisibility.id}
     <div class="compact-field id">#{inc.id}</div>
     {/if}
@@ -1064,10 +1089,11 @@ $: {
           {#if columnVisibility.title}
             <div class="compact-field title" title={inc.incident_name}>
               {#if !inc.editingTitle}
-                <span on:click={() => {
+                <span aria-label="menu" role="button" tabindex="0" on:click={() => {
                   inc.editingTitle = true;
                   inc.renameText = inc.incident_name;
-                }}>
+                }}
+                  on:keydown={(e) => { if(e.key === 'Enter') {e.preventDefault(); handleClick() }}}>
                   {inc.incident_name}
                 </span>
               {:else}
@@ -1076,7 +1102,10 @@ $: {
                   class="title-input"
                   bind:value={inc.renameText}
                   on:blur={() => submitTitle(inc)}
-                  on:keydown={(e) => { if(e.key === 'Enter') submitTitle(inc) }} />
+                  role="button"
+                  tabindex="0"
+                 aria-label="menu" 
+                on:keydown={(e) => { if(e.key === 'Enter') submitTitle(inc) }} />
               {/if}
             </div>
           {/if}
@@ -1103,7 +1132,7 @@ $: {
                     </button>
                 </div>
                 {/if}
-              </div>  
+              </div>
               {:else}
                 <span>{inc.status}</span>
               {/if}
@@ -1189,7 +1218,7 @@ $: {
         </article>
         {:else}
         <!-- Full View (Normal View) -->
-        <article class="col-12 incident-box" 
+        <article class="col-12 incident-box"
         draggable={inc.status !== "resolved" && !inc.definitively_resolved}
         on:dragstart={(e) => handleIncidentDragStart(e, inc)}
         on:drop={(e) => {
@@ -1348,13 +1377,15 @@ $: {
             <div class="row mt-1 mb-3 ml-4">
               <div class="col">
                 {#if !inc.editingTitle}
-                  <span class="title-text" on:click={() => { inc.editingTitle = true; inc.renameText = inc.incident_name; }}>
+                  <span class="title-text"  aria-label="menu" role="button" tabindex="0" on:click={() => { inc.editingTitle = true; inc.renameText = inc.incident_name; }} on:keydown={(e) => { if(e.key === 'Enter') {e.preventDefault(); handleClick() }}}>
                     {inc.incident_name}
                   </span>
                 {:else if !inc.definitively_resolved}
-                  <input type="text" class="title-input" style="width:100%;" bind:value={inc.renameText} autofocus
+                  <input type="text" class="title-input" style="width:100%;" bind:value={inc.renameText} 
                     on:blur={() => submitTitle(inc)}
                     on:keydown={(e) => { if (e.key === 'Enter') submitTitle(inc) }}/>
+                    role="button"
+                    tabindex="0"
                 {:else}
                   <span class="title-text">{inc.incident_name}</span>
                 {/if}
@@ -1366,7 +1397,7 @@ $: {
                 {#if inc.showMainAlerts}
                   <div class="mt-2 p-2 border rounded main-alert-box" role="region" aria-label="Main Alerts">
                     <div class="d-flex justify-content-between align-items-center">
-                      <h5 class="h6 m-1"></h5>
+                 
                       <button class="btn btn-sm btn-outline-primary" on:click={() => toggleMainAlerts(inc)}>Hide Main Alerts</button>
                     </div>
                     {#if inc.main_alerts && inc.main_alerts.length > 0}
