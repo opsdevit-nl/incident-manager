@@ -28,7 +28,24 @@ services:
       - db
     networks:
       - app_network
-  
+
+  tests:
+    build:
+      context: ./features
+      dockerfile: Containerfile.tests   # create a Dockerfile for tests (see below)
+    container_name: tests
+    depends_on:
+      - db
+      - backend
+    # command: ["python", "-m", "behave"]
+    volumes:
+      - ./features/:/app/features:Z
+    environment:
+      - API_BASE=http://backend:8000      
+    working_dir: /app
+    networks:
+      - app_network
+
   frontend:
     build:
       context: ./frontend
@@ -53,7 +70,7 @@ services:
     networks:
       - app_network
 
- 
+
 networks:
   app_network:
     driver: bridge

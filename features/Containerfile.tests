@@ -1,0 +1,14 @@
+# Containerfile.tests
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Copy requirements and install them
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Copy your project code (including features)
+COPY . .
+
+# Explicitly tell Behave to use the "features" directory
+ENTRYPOINT ["python", "-m", "behave", "features"]
